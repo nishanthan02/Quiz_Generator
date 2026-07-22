@@ -20,8 +20,8 @@ from qdrant_client.http.models import (
 )
 from core.config import settings
 
-# Embedding dimension produced by all-MiniLM-L6-v2
-EMBEDDING_DIM = 384
+# Embedding dimension produced by Cohere embed-english-v3.0
+EMBEDDING_DIM = 1024
 
 # ── Singleton client ─────────────────────────────────────────
 # Module-level variable; the client is created once per process.
@@ -57,11 +57,30 @@ def get_qdrant_client() -> QdrantClient:
 def ensure_collection_exists() -> None:
     """
     Idempotently create the Qdrant collection if it doesn't exist.
+    If it exists but was created with a different vector size (e.g. the
+    old 384-dim all-MiniLM-L6-v2 model), it is dropped and recreated
+    so that the new Gemini 768-dim vectors can be stored correctly.
     Safe to call multiple times (e.g. at startup and in worker init).
     """
     try:
         client = get_qdrant_client()
         existing = {c.name for c in client.get_collections().collections}
+
+        if settings.qdrant_collection_name in existing:
+            # Check whether the existing collection has the correct dimension
+            info = client.get_collection(settings.qdrant_collection_name)
+            existing_dim = info.config.params.vectors.size
+            if existing_dim != EMBEDDING_DIM:
+                print(
+                    f"[Qdrant] Collection '{settings.qdrant_collection_name}' has "
+                    f"dim={existing_dim}, expected {EMBEDDING_DIM}. "
+                    "Dropping and recreating with correct dimension..."
+                )
+                client.delete_collection(settings.qdrant_collection_name)
+                existing.discard(settings.qdrant_collection_name)
+            else:
+                print(f"[Qdrant] Collection '{settings.qdrant_collection_name}' already exists (dim={existing_dim}).")
+                return
 
         if settings.qdrant_collection_name not in existing:
             client.create_collection(
@@ -74,8 +93,6 @@ def ensure_collection_exists() -> None:
                 # Qdrant will switch to HNSW automatically as it grows.
                 optimizers_config=OptimizersConfigDiff(indexing_threshold=10_000),
             )
-            print(f"[Qdrant] Created collection '{settings.qdrant_collection_name}'")
-        else:
-            print(f"[Qdrant] Collection '{settings.qdrant_collection_name}' already exists.")
+            print(f"[Qdrant] Created collection '{settings.qdrant_collection_name}' (dim={EMBEDDING_DIM}).")
     except Exception as e:
         print(f"[Warning] Qdrant connection failed: {e}. AI embeddings will be unavailable until Qdrant is running on port 6333.")

@@ -12,8 +12,9 @@ celery==5.4.0
 redis==5.0.4
 
 # --- AI & Embeddings ---
+# Embeddings are generated via Cohere embed-english-v3.0 (1024-dim).
 google-genai==0.8.0
-sentence-transformers==3.0.1
+cohere>=5.0.0
 
 # --- Vector Database ---
 qdrant-client==1.9.1
@@ -33,6 +34,7 @@ python-multipart==0.0.9  # Required for FastAPI file uploads
 # --- Utilities ---
 python-dotenv==1.0.1
 aiofiles==23.2.1         # Async file I/O helpers
+tenacity==8.3.0          # Retry / backoff for Cohere API rate-limit handling
 
 # --- Database ---
 sqlalchemy==2.0.30

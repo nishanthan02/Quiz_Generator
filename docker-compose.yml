@@ -1,0 +1,135 @@
+# ============================================================
+# docker-compose.yml — dynamic_quiz_app
+#
+# Services:
+#   redis            — Celery broker & result backend
+#   api              — FastAPI / uvicorn
+#   worker-documents — Celery worker for the "documents" queue
+#   worker-quizzes   — Celery worker for the "quizzes" queue
+#
+# Usage:
+#   docker compose up --build          # first run
+#   docker compose up -d               # detached
+#   docker compose logs -f api         # tail a specific service
+#   docker compose down -v             # stop + remove volumes
+#
+# Environment:
+#   Copy .env.example → .env and fill in real values before
+#   running.  The REDIS_URL override below ensures containers
+#   resolve each other by service name, not localhost.
+# ============================================================
+
+services:
+
+  # ── Redis ──────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO (Object Storage) ─────────────────────────────────
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      # Reads from your .env file
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"   # API port
+      - "9001:9001"   # Web Console port
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI ────────────────────────────────────────────────
+  api:
+    build: .
+    command: >
+      uvicorn main:app
+        --host 0.0.0.0
+        --port 8000
+        --workers 2
+    # Removed ports binding: 8000 is now internal only.
+    # Caddy handles public traffic on ports 80/443 and routes to api:8000
+    env_file: .env
+    environment:
+      # Override localhost → Docker service name so containers
+      # can reach each other on the compose network.
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Celery: document ingestion worker ─────────────────────
+  worker-documents:
+    build: .
+    command: >
+      celery -A core.celery_app worker
+        -Q documents
+        --pool=threads
+        --concurrency=4
+        --loglevel=info
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Celery: quiz generation worker ────────────────────────
+  worker-quizzes:
+    build: .
+    command: >
+      celery -A core.celery_app worker
+        -Q quizzes
+        --pool=threads
+        --concurrency=4
+        --loglevel=info
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Caddy (Reverse Proxy & Automatic HTTPS) ────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"     # HTTP
+      - "443:443"   # HTTPS
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:-http://localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    depends_on:
+      - api
+
+# ── Named volumes ──────────────────────────────────────────
+volumes:
+  redis_data:
+  minio_data:
+  caddy_data:
+  caddy_config:

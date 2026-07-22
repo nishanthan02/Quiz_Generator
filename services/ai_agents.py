@@ -279,14 +279,37 @@ def retrieve_context_from_qdrant(
 
     This is called by the Celery quiz task — not directly by FastAPI.
     """
-    from sentence_transformers import SentenceTransformer
+    import cohere
+    from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
     from core.qdrant_setup import get_qdrant_client
     from qdrant_client.http.models import Filter, FieldCondition, MatchValue
     from core.config import settings as cfg
 
-    # Load the same model used at ingestion time
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    query_vector = model.encode(topic_focus).tolist()
+    # Embed the topic query using Cohere embed-english-v3.0.
+    # "search_query" input type is optimised for search queries
+    # (asymmetric retrieval against "search_document" chunks).
+    # Wrapped with tenacity retry for 429/5xx resilience.
+    def _is_retryable(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return any(c in msg for c in ["429", "500", "503", "too many requests", "rate limit"])
+
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        wait=wait_exponential(multiplier=1, min=2, max=32),
+        stop=stop_after_attempt(5),
+        reraise=True,
+    )
+    def _do_embed():
+        co = cohere.ClientV2(api_key=cfg.cohere_api_key)
+        resp = co.embed(
+            texts=[topic_focus],
+            model="embed-english-v3.0",
+            input_type="search_query",
+            embedding_types=["float"],
+        )
+        return resp.embeddings.float[0]
+
+    query_vector = _do_embed()
 
     client = get_qdrant_client()
     results = client.search(
