@@ -80,7 +80,6 @@ def ensure_collection_exists() -> None:
                 existing.discard(settings.qdrant_collection_name)
             else:
                 print(f"[Qdrant] Collection '{settings.qdrant_collection_name}' already exists (dim={existing_dim}).")
-                return
 
         if settings.qdrant_collection_name not in existing:
             client.create_collection(
@@ -94,5 +93,13 @@ def ensure_collection_exists() -> None:
                 optimizers_config=OptimizersConfigDiff(indexing_threshold=10_000),
             )
             print(f"[Qdrant] Created collection '{settings.qdrant_collection_name}' (dim={EMBEDDING_DIM}).")
+            
+        # Always ensure index exists (idempotent)
+        client.create_payload_index(
+            collection_name=settings.qdrant_collection_name,
+            field_name="document_id",
+            field_schema="integer",
+        )
+        print(f"[Qdrant] Ensured payload index exists for 'document_id'.")
     except Exception as e:
         print(f"[Warning] Qdrant connection failed: {e}. AI embeddings will be unavailable until Qdrant is running on port 6333.")
