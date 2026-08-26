@@ -1,5 +1,6 @@
 # routers/management.py
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -8,6 +9,8 @@ from typing import List, Optional
 from core.database import get_async_db
 from core.models import User, Subject, Quiz, Question, Option, Document, StudentAttempt
 from routers.auth_router import get_current_faculty
+from services.minio_service import upload_document
+from workers.document_tasks import process_document
 
 router = APIRouter(prefix="/management", tags=["management"])
 
@@ -199,11 +202,13 @@ async def upload_subject_document(
     subject_id: int, 
     file: UploadFile = File(...), 
     db: AsyncSession = Depends(get_async_db), 
-    current_user: User = Depends(get_current_faculty)
+    current_user: User = Depends(get_current_faculty),
+    doc_type: str | None = Form(default=None, description="Optional override: 'digital' | 'scanned' | 'legacy_tamil'"),
+    language: str | None = Form(default="auto", description="Optional override: 'english' | 'tamil' | 'mixed' | 'auto'"),
+    model_id: str = Form(default="gemini-2.5-flash", description="Vision LLM used if OCR is needed"),
+    start_page: int | None = Form(default=None, description="Optional start page for extraction (1-indexed)"),
+    end_page: int | None = Form(default=None, description="Optional end page for extraction (1-indexed)"),
 ):
-    from services.minio_service import upload_document
-    from workers.document_tasks import process_document
-
     result = await db.execute(select(Subject).where(Subject.id == subject_id, Subject.faculty_id == current_user.id))
     subject = result.scalars().first()
     if not subject:
@@ -223,8 +228,35 @@ async def upload_subject_document(
             detail="You can upload a maximum of 5 documents across all subjects. Please delete an existing document before adding a new one."
         )
 
+    # Validate optional doc_type value
+    _VALID_DOC_TYPES = {"digital", "scanned", "legacy_tamil"}
+    if doc_type and doc_type not in _VALID_DOC_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid doc_type '{doc_type}'. Must be one of: {sorted(_VALID_DOC_TYPES)}"
+        )
+
+    # Validate optional language value
+    _VALID_LANGUAGES = {"english", "tamil", "mixed", "auto"}
+    if language and language not in _VALID_LANGUAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid language '{language}'. Must be one of: {sorted(_VALID_LANGUAGES)}"
+        )
+
+    if start_page is not None and start_page < 1:
+        raise HTTPException(status_code=400, detail="start_page must be >= 1")
+    if end_page is not None and end_page < 1:
+        raise HTTPException(status_code=400, detail="end_page must be >= 1")
+    if start_page is not None and end_page is not None and start_page > end_page:
+        raise HTTPException(status_code=400, detail="start_page cannot be greater than end_page")
+
     # Read file bytes into memory
     file_bytes = await file.read()
+    
+    # If a page range was requested, crop the file BEFORE storing it to save space
+    from services.document_cropper import crop_document_bytes
+    file_bytes = crop_document_bytes(file_bytes, file.filename, start_page, end_page)
     
     try:
         # Upload to MinIO (or fallback)
@@ -242,15 +274,30 @@ async def upload_subject_document(
         subject_id=subject.id,
         filename=file.filename,
         minio_path=minio_path,
+        declared_language=language,
+        doc_type=doc_type,
         status="pending" 
     )
     db.add(new_doc)
     await db.commit()
     await db.refresh(new_doc)
     
-    # Trigger AI processing pipeline
+    # Trigger AI processing pipeline.
+    # NOTE: start_page / end_page are NOT passed to the worker because the file
+    # stored in MinIO is already cropped to the requested page range.
+    # Passing the original range again would cause the worker to re-crop an
+    # already-cropped file, producing wrong results or empty text.
     try:
-        process_document.delay(new_doc.id, minio_path, file.filename)
+        process_document.delay(
+            new_doc.id,
+            minio_path,
+            file.filename,
+            model_id=model_id,
+            doc_type=doc_type,
+            language=language,
+            start_page=None,
+            end_page=None,
+        )
     except Exception as e:
         # If celery is down, update status
         new_doc.status = "failed"
@@ -258,6 +305,149 @@ async def upload_subject_document(
         await db.commit()
         
     return subject
+
+# ── Document Download: Raw File ─────────────────────────────
+
+@router.get("/documents/{document_id}/download/raw")
+async def download_document_raw(
+    document_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty),
+):
+    """
+    Stream the original raw file (PDF/PPTX) back to the browser.
+    - If uploaded while MinIO was running: fetches from MinIO (localhost:9000).
+    - If uploaded while MinIO was down: reads from local tmp_uploads/ fallback.
+    """
+    from services.minio_service import download_document as minio_download
+    import mimetypes
+
+    # Verify the document belongs to this faculty's subject
+    result = await db.execute(
+        select(Document)
+        .join(Subject, Subject.id == Document.subject_id)
+        .where(Document.id == document_id, Subject.faculty_id == current_user.id)
+    )
+    doc = result.scalars().first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    try:
+        file_bytes = minio_download(doc.minio_path)
+    except Exception as e:
+        # Give a useful message so the developer knows exactly what failed
+        if doc.minio_path.startswith("tmp_uploads/"):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Local file not found at '{doc.minio_path}'. "
+                       "The file may have been deleted from the tmp_uploads folder.",
+            )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Cannot reach MinIO at '{doc.minio_path}'. "
+                "MinIO is not running. Start it with: "
+                "docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin "
+                "-e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data"
+            ),
+        )
+
+    mime_type, _ = mimetypes.guess_type(doc.filename)
+    mime_type = mime_type or "application/octet-stream"
+
+    import io
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type=mime_type,
+        headers={"Content-Disposition": f'attachment; filename="{doc.filename}"'},
+    )
+
+
+# ── Document Download: Vector Chunks ─────────────────────────
+
+@router.get("/documents/{document_id}/download/chunks")
+async def download_document_chunks(
+    document_id: int,
+    include_vectors: bool = False,   # ?include_vectors=true to add 1024-dim floats
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty),
+):
+    """
+    Fetch all text chunks stored in Qdrant for this document.
+
+    By default only the chunk text is returned (fast, ~seconds).
+    Pass ?include_vectors=true to also get the 1024-dim float vectors
+    (this makes the request significantly slower for large documents).
+    """
+    from core.qdrant_setup import get_qdrant_client
+    from core.config import settings
+    from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+
+    # Verify the document belongs to this faculty's subject
+    result = await db.execute(
+        select(Document)
+        .join(Subject, Subject.id == Document.subject_id)
+        .where(Document.id == document_id, Subject.faculty_id == current_user.id)
+    )
+    doc = result.scalars().first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    try:
+        client = get_qdrant_client()
+        points, _ = client.scroll(
+            collection_name=settings.qdrant_collection_name,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="document_id",
+                        match=MatchValue(value=document_id),
+                    )
+                ]
+            ),
+            limit=10_000,
+            with_payload=True,
+            with_vectors=include_vectors,   # only fetch vectors when explicitly requested
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query Qdrant: {e}")
+
+    if not points:
+        raise HTTPException(
+            status_code=404,
+            detail="No vector chunks found for this document. It may still be processing.",
+        )
+
+    chunks_data = [
+        {
+            "chunk_index": p.payload.get("chunk_index"),
+            "text": p.payload.get("text"),
+            **(  {"vector": p.vector} if include_vectors else {}  ),
+            "point_id": str(p.id),
+        }
+        for p in sorted(points, key=lambda p: p.payload.get("chunk_index", 0))
+    ]
+
+    export = {
+        "document_id": document_id,
+        "filename": doc.filename,
+        "total_chunks": len(chunks_data),
+        "include_vectors": include_vectors,
+        "chunks": chunks_data,
+    }
+
+    import json
+    json_bytes = json.dumps(export, indent=2, ensure_ascii=False).encode("utf-8")
+    safe_name = doc.filename.rsplit(".", 1)[0].replace(" ", "_")
+    suffix = "_chunks_with_vectors" if include_vectors else "_chunks"
+
+    import io
+    return StreamingResponse(
+        io.BytesIO(json_bytes),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}{suffix}.json"'},
+    )
+
 
 @router.delete("/subjects/{subject_id}/documents/{document_id}")
 async def delete_subject_document(

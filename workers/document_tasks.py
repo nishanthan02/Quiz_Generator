@@ -75,20 +75,26 @@ def _get_cohere_client():
     return _cohere_client
 
 
-def _embed_texts(texts: list[str], input_type: str = "search_document") -> list[list[float]]:
+def _embed_texts(
+    texts: list[str],
+    input_type: str = "search_document",
+    model: str = "embed-english-v3.0",
+) -> list[list[float]]:
     """
-    Embed a list of texts using Cohere embed-english-v3.0.
+    Embed a list of texts using a Cohere embedding model.
 
     Sends all texts in a single batched API call (up to 96 per request).
     Retries automatically on rate-limit (429) or server errors (500/503)
     with exponential backoff — up to 5 attempts, waiting 2→4→8→16→32 s.
-    This prevents a transient Cohere hiccup from failing the Celery job.
 
     Args:
         texts:      The list of text strings to embed.
         input_type: Cohere input type hint.
                     Use "search_document" for document chunks,
                     "search_query" for a search query.
+        model:      Cohere embedding model name.
+                    Use "embed-english-v3.0" for English content.
+                    Use "embed-multilingual-v3.0" for Tamil / mixed content.
 
     Returns:
         A list of 1024-dimensional float vectors, one per input text.
@@ -100,7 +106,7 @@ def _embed_texts(texts: list[str], input_type: str = "search_document") -> list[
 
     for batch_start in range(0, len(texts), BATCH_SIZE):
         batch = texts[batch_start : batch_start + BATCH_SIZE]
-        vectors = _embed_batch_with_retry(client, batch, input_type)
+        vectors = _embed_batch_with_retry(client, batch, input_type, model)
         all_vectors.extend(vectors)
 
     return all_vectors
@@ -117,24 +123,36 @@ def _embed_batch_with_retry(
     client,
     batch: list[str],
     input_type: str,
+    model: str = "embed-english-v3.0",
 ) -> list[list[float]]:
     """Single Cohere embed call, wrapped with tenacity retry."""
     response = client.embed(
         texts=batch,
-        model="embed-english-v3.0",
+        model=model,
         input_type=input_type,
         embedding_types=["float"],
     )
     return response.embeddings.float
 
 
-def update_document_status_sync(doc_id: int, status: str, error_msg: str = None):
+def update_document_status_sync(
+    doc_id: int,
+    status: str,
+    error_msg: str = None,
+    doc_type: str = None,
+    language: str = None,
+):
+    """Update a Document row's status (and optional metadata) synchronously."""
     with SyncSessionLocal() as db:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if doc:
             doc.status = status
             if error_msg:
                 doc.error_msg = error_msg
+            if doc_type:
+                doc.doc_type = doc_type
+            if language:
+                doc.language = language
             db.commit()
 
 
@@ -147,7 +165,17 @@ def update_document_status_sync(doc_id: int, status: str, error_msg: str = None)
     default_retry_delay=30,  # seconds between retries
     queue="documents",
 )
-def process_document(self: Task, document_id: int, minio_path: str, filename: str) -> dict:
+def process_document(
+    self: Task,
+    document_id: int,
+    minio_path: str,
+    filename: str,
+    model_id: str = "gemini-2.5-flash",
+    doc_type: str | None = None,
+    language: str | None = None,
+    start_page: int | None = None,
+    end_page: int | None = None,
+) -> dict:
     """
     Extract text from a stored document and ingest it into Qdrant.
 
@@ -156,9 +184,17 @@ def process_document(self: Task, document_id: int, minio_path: str, filename: st
                      so we can filter search results by document.
         minio_path:  The "bucket/object" path stored in SQLite.
         filename:    Original filename — used to detect file type.
+        model_id:    Vision LLM to use if the document needs Vision OCR.
+                     Defaults to gemini-2.5-flash.
+        doc_type:    Optional user-provided document type override.
+                     "digital" | "scanned" | "legacy_tamil"
+                     If None, auto-detection runs from file content.
+        language:    Optional user-provided language override.
+                     "english" | "tamil" | "mixed"
+                     If None, auto-detection infers language.
 
     Returns:
-        dict with { "document_id", "chunks_ingested", "status" }
+        dict with { "document_id", "chunks_ingested", "status", "doc_type", "language" }
     """
     try:
         # ── Mark as processing ──────────────────────────────
@@ -168,19 +204,48 @@ def process_document(self: Task, document_id: int, minio_path: str, filename: st
         print(f"[DocTask {document_id}] Downloading from MinIO: {minio_path}")
         file_bytes = download_document(minio_path)
 
-        # ── Step 6: Extract text ────────────────────────────
-        print(f"[DocTask {document_id}] Extracting text from '{filename}'")
-        text = extract_text(file_bytes, filename)
+        # ── Step 6: Extract text (cascade) ────────
+        print(f"[DocTask {document_id}] Extracting text from '{filename}' (pages {start_page}-{end_page})")
+        text, detection = extract_text(
+            file_bytes, filename, 
+            declared_language=language, 
+            doc_type=doc_type, 
+            start_page=start_page, 
+            end_page=end_page
+        )
+
         if not text.strip():
             raise ValueError("No text could be extracted from the document.")
+
+        failed_pages = detection.pop("failed_pages", [])
+        status_to_set = "partial_complete" if failed_pages else "complete"
+
+        print(
+            f"[DocTask {document_id}] Detection: "
+            f"doc_type={detection['doc_type']}, "
+            f"language={detection['language']}, "
+            f"failed_pages={failed_pages}"
+        )
+
+        # Persist detection metadata to DB immediately
+        update_document_status_sync(
+            document_id, "processing",
+            doc_type=detection["doc_type"],
+            language=detection["language"],
+        )
 
         # ── Step 7: Chunk text ──────────────────────────────
         chunks = chunk_text(text, chunk_size=250, overlap=50)
         print(f"[DocTask {document_id}] Created {len(chunks)} chunks.")
 
-        # ── Step 8: Encode chunks via Cohere API ────────────
-        print(f"[DocTask {document_id}] Generating embeddings via Cohere API (embed-english-v3.0)...")
-        vectors = _embed_texts(chunks, input_type="search_document")
+        # ── Step 8: Choose embedding model ────────
+        embed_model = "embed-multilingual-v3.0"
+        
+        print(
+            f"[DocTask {document_id}] Embedding with Cohere '{embed_model}' "
+            f"({len(chunks)} chunks)..."
+        )
+        vectors = _embed_texts(chunks, input_type="search_document", model=embed_model)
 
         # ── Step 9: Upsert into Qdrant ──────────────────────
         ensure_collection_exists()
@@ -210,13 +275,18 @@ def process_document(self: Task, document_id: int, minio_path: str, filename: st
 
         print(f"[DocTask {document_id}] Upserted {len(points)} vectors to Qdrant.")
 
-        # ── Step 10: Mark complete ──────────────────────────
-        update_document_status_sync(document_id, "complete")
+        # ── Step 10: Mark complete ───────────────────────────
+        
+        error_msg = f"Failed to OCR pages: {failed_pages}" if failed_pages else None
+        update_document_status_sync(document_id, status_to_set, error_msg=error_msg)
 
         return {
             "document_id":    document_id,
             "chunks_ingested": len(points),
-            "status":         "complete",
+            "status":         status_to_set,
+            "doc_type":       detection["doc_type"],
+            "language":       detection["language"],
+            "failed_pages":   failed_pages,
         }
 
     except ValueError as val_err:

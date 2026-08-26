@@ -17,8 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install MinIO ─────────────────────────────────────────────
-RUN wget -qO /usr/local/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio \
+RUN wget -q --tries=5 --timeout=60 -O /usr/local/bin/minio \
+        https://dl.min.io/server/minio/release/linux-amd64/minio \
+    || curl -fsSL --retry 5 --retry-delay 5 \
+        https://dl.min.io/server/minio/release/linux-amd64/minio \
+        -o /usr/local/bin/minio \
     && chmod +x /usr/local/bin/minio
+
 
 # ── Create required directories & User setup ──────────────────
 # HF Spaces run as UID 1000. We must create the user and give it

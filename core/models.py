@@ -63,6 +63,13 @@ class Document(Base):
     minio_path = Column(String, nullable=False)
     status = Column(String, nullable=False, default='pending')
     error_msg = Column(Text)
+    # Detection metadata — populated by the Celery document task.
+    # doc_type: "digital_unicode" | "scanned" | "legacy_font"
+    # language:  "english" | "tamil" | "mixed" | "unknown"
+    # Both are nullable so pre-existing rows remain valid.
+    doc_type = Column(String, nullable=True)
+    language = Column(String, nullable=True)
+    declared_language = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

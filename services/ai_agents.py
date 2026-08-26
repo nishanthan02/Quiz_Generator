@@ -114,6 +114,78 @@ def _call_llm(model_id: str, prompt: str) -> str:
         raise ValueError(f"Unknown model_id: {model_id}")
 
 
+def _call_llm_vision(model_id: str, image_bytes: bytes, prompt: str) -> str:
+    """
+    Call a Vision-capable LLM with a PNG image and a text prompt.
+    Used exclusively for OCR of scanned documents and legacy Tamil font PDFs.
+
+    Supports:
+      - gemini-2.5-flash : Google Gemini multimodal API (google-genai SDK)
+      - gpt-4o-mini      : OpenAI vision via Azure Inference endpoint
+
+    Non-vision models (llama-3.3-70b-versatile, command-r-08-2024, Mistral-small)
+    are automatically redirected to gemini-2.5-flash with a warning log.
+    This keeps the Vision path working regardless of which model the faculty
+    selected for quiz generation.
+    """
+    import os
+    import base64
+
+    # Models that do not support image input — redirect to Gemini
+    _NON_VISION_MODELS = {
+        "llama-3.3-70b-versatile",
+        "command-r-08-2024",
+        "Mistral-small",
+    }
+    if model_id in _NON_VISION_MODELS:
+        print(
+            f"[VisionOCR] Warning: '{model_id}' does not support Vision input. "
+            "Falling back to gemini-2.5-flash for document OCR."
+        )
+        model_id = "gemini-2.5-flash"
+
+    if model_id == "gemini-2.5-flash":
+        from google.genai import types
+        client = _get_client()
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                prompt,
+            ],
+        )
+        if not response.text:
+            raise RuntimeError("Gemini Vision returned an empty response.")
+        return response.text
+
+    elif model_id == "gpt-4o-mini":
+        from openai import OpenAI
+        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+        client = OpenAI(
+            base_url="https://models.inference.ai.azure.com",
+            api_key=os.getenv("GITHUB_TOKEN"),
+        )
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64_image}"},
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+        )
+        return response.choices[0].message.content
+
+    else:
+        raise ValueError(f"Unsupported Vision model_id: '{model_id}'")
+
+
 def _parse_json_response(raw: str) -> list[dict]:
     """
     Safely parse a JSON array from Gemini's text output.
@@ -159,6 +231,7 @@ Rules:
   4. For Short Answer: provide a concise model answer (1–2 sentences).
   5. Questions must vary in wording structure — do not repeat sentence patterns.
   6. Spread questions evenly across the context — do not focus only on the opening paragraphs.
+  7. IMPORTANT LANGUAGE RULE: The generated questions and options MUST be in the same language as the provided context. If the context is in Tamil, generate the quiz in Tamil. If English, generate in English.
 
 Context retrieved from course material:
 ---
@@ -303,7 +376,7 @@ def retrieve_context_from_qdrant(
         co = cohere.ClientV2(api_key=cfg.cohere_api_key)
         resp = co.embed(
             texts=[topic_focus],
-            model="embed-english-v3.0",
+            model="embed-multilingual-v3.0",
             input_type="search_query",
             embedding_types=["float"],
         )

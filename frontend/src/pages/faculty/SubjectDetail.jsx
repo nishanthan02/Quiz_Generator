@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, FileText, BrainCircuit, BarChart3, Plus, UploadCloud, RefreshCw, Trash2, Download } from 'lucide-react';
-import { api } from '../../api/client';
+import { ArrowLeft, FileText, BrainCircuit, BarChart3, Plus, UploadCloud, RefreshCw, Trash2, Download, FileDown, DatabaseZap } from 'lucide-react';
+import { api, getApiErrorMessage } from '../../api/client';
 import toast from 'react-hot-toast';
 import ConstructQuizModal from '../../components/wizard/ConstructQuizModal';
 
@@ -13,6 +13,8 @@ export default function SubjectDetail() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
+  const [startPage, setStartPage] = useState('');
+  const [endPage, setEndPage] = useState('');
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -42,13 +44,19 @@ export default function SubjectDetail() {
     setUploading(true);
     const loadingToast = toast.loading('Uploading document...');
     try {
-      await api.uploadDocument(id, file);
+      const options = {};
+      if (startPage) options.start_page = parseInt(startPage, 10);
+      if (endPage) options.end_page = parseInt(endPage, 10);
+
+      await api.uploadDocument(id, file, options);
       toast.success('Document uploaded successfully!', { id: loadingToast });
       fetchSubjectDetail(); // Refresh the list
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Failed to upload document', { id: loadingToast });
+      toast.error(getApiErrorMessage(err, 'Failed to upload document'), { id: loadingToast });
     } finally {
       setUploading(false);
+      setStartPage('');
+      setEndPage('');
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -63,7 +71,41 @@ export default function SubjectDetail() {
       toast.success('Document deleted successfully!', { id: deletingToast });
       fetchSubjectDetail();
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Failed to delete document', { id: deletingToast });
+      toast.error(getApiErrorMessage(err, 'Failed to delete document'), { id: deletingToast });
+    }
+  };
+
+  const triggerBlobDownload = (blob, filename) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const handleDocumentDownloadRaw = async (doc) => {
+    const loadingToast = toast.loading(`Downloading ${doc.filename}...`);
+    try {
+      const response = await api.downloadDocumentRaw(doc.id);
+      triggerBlobDownload(response.data, doc.filename);
+      toast.success('Raw file downloaded!', { id: loadingToast });
+    } catch (err) {
+      toast.error('Failed to download raw file', { id: loadingToast });
+    }
+  };
+
+  const handleDocumentDownloadChunks = async (doc) => {
+    const safeName = doc.filename.replace(/\.[^.]+$/, '').replace(/\s+/g, '_');
+    const loadingToast = toast.loading('Fetching vector chunks...');
+    try {
+      const response = await api.downloadDocumentChunks(doc.id);
+      triggerBlobDownload(response.data, `${safeName}_chunks.json`);
+      toast.success('Vector chunks downloaded!', { id: loadingToast });
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Failed to download chunks'), { id: loadingToast });
     }
   };
 
@@ -78,7 +120,7 @@ export default function SubjectDetail() {
       toast.success('Quiz deleted successfully!', { id: deletingToast });
       fetchSubjectDetail();
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Failed to delete quiz', { id: deletingToast });
+      toast.error(getApiErrorMessage(err, 'Failed to delete quiz'), { id: deletingToast });
     }
   };
 
@@ -104,7 +146,7 @@ export default function SubjectDetail() {
       downloadAnchorNode.remove();
       toast.success('Download started!', { id: loadingToast });
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Failed to download quiz', { id: loadingToast });
+      toast.error(getApiErrorMessage(err, 'Failed to download quiz'), { id: loadingToast });
     }
   };
 
@@ -153,21 +195,44 @@ export default function SubjectDetail() {
             <div className="flex justify-between items-center">
               <h2 className="text-lg font-semibold text-slate-800">Reference Documents</h2>
               
-              <input 
-                type="file" 
-                ref={fileInputRef} 
-                onChange={handleFileUpload}
-                className="hidden" 
-                accept=".pdf,.pptx"
-              />
-              <button 
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
-                className="text-sm bg-indigo-50 text-indigo-700 px-4 py-2 rounded-md font-medium hover:bg-indigo-100 transition-colors flex items-center disabled:opacity-50"
-              >
-                {uploading ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <UploadCloud className="w-4 h-4 mr-2" />}
-                {uploading ? 'Uploading...' : 'Add Document'}
-              </button>
+              <div className="flex items-center space-x-3">
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="number"
+                    min="1"
+                    placeholder="Start Pg (opt)"
+                    value={startPage}
+                    onChange={(e) => setStartPage(e.target.value)}
+                    className="w-28 text-sm border-slate-200 rounded-md focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-xs"
+                    disabled={uploading}
+                  />
+                  <span className="text-slate-400">-</span>
+                  <input
+                    type="number"
+                    min="1"
+                    placeholder="End Pg (opt)"
+                    value={endPage}
+                    onChange={(e) => setEndPage(e.target.value)}
+                    className="w-28 text-sm border-slate-200 rounded-md focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-xs"
+                    disabled={uploading}
+                  />
+                </div>
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleFileUpload}
+                  className="hidden" 
+                  accept=".pdf,.pptx"
+                />
+                <button 
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading}
+                  className="text-sm bg-indigo-50 text-indigo-700 px-4 py-2 rounded-md font-medium hover:bg-indigo-100 transition-colors flex items-center disabled:opacity-50"
+                >
+                  {uploading ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <UploadCloud className="w-4 h-4 mr-2" />}
+                  {uploading ? 'Uploading...' : 'Add Document'}
+                </button>
+              </div>
             </div>
             <p className="text-slate-500 text-sm border-b pb-4 border-slate-100">
               Upload syllabus and slide decks here. The AI will use these as context generation.
@@ -181,18 +246,41 @@ export default function SubjectDetail() {
                 </div>
               ) : (
                 subject.documents?.map(doc => (
-                  <div key={doc.id} className="flex justify-between items-center p-3 border border-slate-200 rounded-lg bg-slate-50 hover:bg-slate-100 transition-colors">
+                  <div key={doc.id} className="flex justify-between items-center p-3 border border-slate-200 rounded-lg bg-slate-50 hover:bg-slate-100 transition-colors group">
                     <div className="flex items-center space-x-3">
                       <FileText className="w-5 h-5 text-indigo-500" />
                       <span className="font-medium text-slate-700">{doc.filename}</span>
                     </div>
-                    <div className="flex items-center space-x-3">
-                      <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full font-semibold capitalize">
+                    <div className="flex items-center space-x-2">
+                      <span className={`text-xs px-2 py-1 rounded-full font-semibold capitalize ${
+                        doc.status === 'complete'    ? 'bg-green-100 text-green-700'  :
+                        doc.status === 'processing'  ? 'bg-blue-100 text-blue-700'    :
+                        doc.status === 'failed'      ? 'bg-red-100 text-red-700'      :
+                        'bg-amber-100 text-amber-700'
+                      }`}>
+                        {doc.status === 'processing' && <RefreshCw className="inline w-3 h-3 mr-1 animate-spin" />}
                         {doc.status}
                       </span>
-                      <button 
+                      {/* Download raw file — always available once uploaded */}
+                      <button
+                        onClick={() => handleDocumentDownloadRaw(doc)}
+                        className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                        title="Download original file"
+                      >
+                        <FileDown className="w-4 h-4" />
+                      </button>
+                      {/* Download vector chunks — only available after processing */}
+                      <button
+                        onClick={() => handleDocumentDownloadChunks(doc)}
+                        disabled={doc.status !== 'complete'}
+                        className="p-1.5 text-slate-400 hover:text-purple-600 hover:bg-purple-50 rounded-md transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                        title={doc.status === 'complete' ? 'Download vector chunks (JSON)' : 'Document must finish processing first'}
+                      >
+                        <DatabaseZap className="w-4 h-4" />
+                      </button>
+                      <button
                         onClick={() => handleDocumentDelete(doc.id)}
-                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
+                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
                         title="Delete Document"
                       >
                         <Trash2 className="w-4 h-4" />

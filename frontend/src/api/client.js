@@ -1,6 +1,24 @@
 import axios from 'axios';
 
-const baseURL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+/**
+ * Safely extract a human-readable message from a FastAPI error response.
+ * FastAPI returns a string for most errors, but Pydantic validation errors (422)
+ * return an array of { type, loc, msg, input } objects. Rendering that array
+ * directly as a React child throws "Objects are not valid as a React child".
+ */
+export function getApiErrorMessage(err, fallback = 'An unexpected error occurred') {
+  const detail = err?.response?.data?.detail;
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    // Pydantic v2 validation error array — join the human-readable messages
+    return detail.map(e => e?.msg || JSON.stringify(e)).join('; ');
+  }
+  return fallback;
+}
+
+// Temporarily hardcoded to 7860 (the Docker port) to avoid .env configuration issues
+const baseURL = import.meta.env.VITE_API_URL || 'http://localhost:7860';
 
 export const apiClient = axios.create({
   baseURL,
@@ -51,17 +69,42 @@ export const api = {
     const response = await apiClient.post('/management/subjects', data);
     return response.data;
   },
-  uploadDocument: async (subjectId, file) => {
+  uploadDocument: async (subjectId, file, options = {}) => {
     const formData = new FormData();
     formData.append('file', file);
-    const response = await apiClient.post(`/management/subjects/${subjectId}/documents`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+    
+    // Append any additional options like start_page, end_page, doc_type, language
+    Object.keys(options).forEach(key => {
+      if (options[key] !== undefined && options[key] !== null) {
+        formData.append(key, options[key]);
+      }
     });
+
+    // IMPORTANT: Delete the default 'Content-Type: application/json' header for this
+    // request so the browser can set 'multipart/form-data' with the correct boundary.
+    // If we leave the JSON header, FastAPI cannot parse the file upload and returns 422.
+    const response = await apiClient.post(
+      `/management/subjects/${subjectId}/documents`,
+      formData,
+      { headers: { 'Content-Type': undefined } },
+    );
     return response.data;
   },
   deleteDocument: async (subjectId, documentId) => {
     const response = await apiClient.delete(`/management/subjects/${subjectId}/documents/${documentId}`);
     return response.data;
+  },
+  downloadDocumentRaw: async (documentId) => {
+    const response = await apiClient.get(`/management/documents/${documentId}/download/raw`, {
+      responseType: 'blob',
+    });
+    return response;
+  },
+  downloadDocumentChunks: async (documentId) => {
+    const response = await apiClient.get(`/management/documents/${documentId}/download/chunks`, {
+      responseType: 'blob',
+    });
+    return response;
   },
   getQuiz: async (quizId) => {
     const response = await apiClient.get(`/management/quizzes/${quizId}`);

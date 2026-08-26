@@ -19,9 +19,11 @@
 # ============================================================
 
 from contextlib import asynccontextmanager
+import traceback
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from core.config import settings
 from core.database import init_db_sync
@@ -31,19 +33,21 @@ from routers import auth_router, management, learning
 
 # ── Lifespan (startup / shutdown hooks) ─────────────────────
 
+import asyncio
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Code before `yield` runs at startup.
     Code after `yield` runs at shutdown.
-    Using the modern lifespan approach (replaces @app.on_event).
     """
     # ── Startup ──────────────────────────────────────────
-    print("[Startup] Initialising SQLite schema...")
-    init_db_sync()
+    print("[Startup] Initialising PostgreSQL schema...")
+    # Wrap synchronous DB/Network calls in to_thread to avoid blocking the async event loop
+    await asyncio.to_thread(init_db_sync)
 
     print("[Startup] Ensuring Qdrant collection exists...")
-    ensure_collection_exists()
+    await asyncio.to_thread(ensure_collection_exists)
 
     print(f"[Startup] App environment: {settings.app_env}")
     print("[Startup] Ready to accept requests.")
@@ -52,35 +56,22 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ──────────────────────────────────────────
     print("[Shutdown] Cleaning up resources...")
-    # Qdrant and MinIO clients manage their own connection pools.
-    # Nothing explicit needed here for SQLite (connections are
-    # per-request and closed automatically).
-
 
 # ── App factory ──────────────────────────────────────────────
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Dynamic Quiz Generator API",
-        description=(
-            "EdTech API for Moodle plugins. Upload course materials, "
-            "process them into vector embeddings, and generate massive "
-            "anti-cheat quiz variant sets using an Agentic AI workflow."
-        ),
         version="1.0.0",
         lifespan=lifespan,
-        # Disable docs in production for security
-        docs_url="/docs" if settings.app_env != "production" else None,
-        redoc_url="/redoc" if settings.app_env != "production" else None,
     )
 
     # ── CORS ──────────────────────────────────────────────
-    # Allow all origins for now to ensure the Vercel frontend can connect.
-    # In a strict production environment, replace ["*"] with your Vercel URL.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=["*"], 
+        # When allow_origins is "*", allow_credentials must be False in modern browsers
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -91,6 +82,21 @@ def create_app() -> FastAPI:
     app.include_router(auth_router.router)
     app.include_router(management.router)
     app.include_router(learning.router)
+
+    # ── Global exception handler ──────────────────────────
+    # In Starlette 0.37.x, unhandled exceptions are caught by
+    # ServerErrorMiddleware (outermost) which returns a plain 500
+    # that NEVER goes back through CORSMiddleware → browser blocks it.
+    # A registered exception_handler returns a JSONResponse which
+    # DOES travel through CORSMiddleware, so CORS headers are present.
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        tb = traceback.format_exc()
+        print(f"[ERROR] Unhandled exception on {request.method} {request.url}:\n{tb}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"},
+        )
 
     return app
 
