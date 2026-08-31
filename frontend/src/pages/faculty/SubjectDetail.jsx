@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, FileText, BrainCircuit, BarChart3, Plus, UploadCloud, RefreshCw, Trash2, Download, FileDown, DatabaseZap } from 'lucide-react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import { ArrowLeft, FileText, BrainCircuit, Users, Plus, UploadCloud, RefreshCw, Trash2, Download, FileDown, DatabaseZap } from 'lucide-react';
 import { api, getApiErrorMessage } from '../../api/client';
 import toast from 'react-hot-toast';
 import ConstructQuizModal from '../../components/wizard/ConstructQuizModal';
@@ -10,6 +10,7 @@ export default function SubjectDetail() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('documents');
   const [subject, setSubject] = useState(null);
+  const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
@@ -17,13 +18,26 @@ export default function SubjectDetail() {
   const [endPage, setEndPage] = useState('');
   const fileInputRef = useRef(null);
 
+  const [enrollForm, setEnrollForm] = useState({ name: '', email: '' });
+  const [enrolling, setEnrolling] = useState(false);
+
   useEffect(() => {
     fetchSubjectDetail();
+    fetchStudents();
     
     // Simple polling to catch celery background task completions
     const intervalId = setInterval(fetchSubjectDetail, 5000);
     return () => clearInterval(intervalId);
   }, [id]);
+
+  const fetchStudents = async () => {
+    try {
+      const data = await api.getEnrolledStudents(id);
+      setStudents(data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const fetchSubjectDetail = async () => {
     try {
@@ -34,6 +48,22 @@ export default function SubjectDetail() {
       navigate('/faculty/dashboard');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleEnrollStudent = async (e) => {
+    e.preventDefault();
+    setEnrolling(true);
+    const loadingToast = toast.loading('Enrolling student...');
+    try {
+      await api.enrollStudent(id, enrollForm);
+      toast.success('Student enrolled successfully!', { id: loadingToast });
+      setEnrollForm({ name: '', email: '' });
+      fetchStudents();
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Failed to enroll student'), { id: loadingToast });
+    } finally {
+      setEnrolling(false);
     }
   };
 
@@ -124,6 +154,18 @@ export default function SubjectDetail() {
     }
   };
 
+  const handlePublishQuiz = async (e, quizId) => {
+    e.stopPropagation();
+    const toastId = toast.loading('Publishing quiz...');
+    try {
+      await api.updateQuiz(quizId, { status: 'published' });
+      toast.success('Quiz published successfully!', { id: toastId });
+      fetchSubjectDetail();
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Failed to publish quiz'), { id: toastId });
+    }
+  };
+
   const handleQuizDownload = async (e, quiz) => {
     e.stopPropagation();
     const loadingToast = toast.loading('Preparing download...');
@@ -185,6 +227,13 @@ export default function SubjectDetail() {
         >
           <BrainCircuit className="w-4 h-4" />
           <span>Quizzes</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('students')}
+          className={`flex items-center space-x-2 px-4 py-2 rounded-md font-medium text-sm transition-all ${activeTab === 'students' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+        >
+          <Users className="w-4 h-4" />
+          <span>Students</span>
         </button>
       </div>
 
@@ -334,10 +383,28 @@ export default function SubjectDetail() {
                       <span className={`text-xs px-2.5 py-1 rounded-full font-semibold capitalize ${
                          quiz.status === 'generating' ? 'bg-amber-100 text-amber-700' :
                          quiz.status === 'failed' ? 'bg-red-100 text-red-700' :
+                         quiz.status === 'published' ? 'bg-blue-100 text-blue-700' :
                          'bg-green-100 text-green-700'
                       }`}>
                         {quiz.status}
                       </span>
+                      {(quiz.status === 'draft' || quiz.status === 'complete') && (
+                        <button
+                          onClick={(e) => handlePublishQuiz(e, quiz.id)}
+                          className="text-sm bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600 transition-colors"
+                        >
+                          Publish
+                        </button>
+                      )}
+                      {quiz.status === 'published' && (
+                        <Link
+                          to={`/faculty/quiz/${quiz.id}/results`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-sm bg-indigo-50 text-indigo-700 px-3 py-1 rounded hover:bg-indigo-100 transition-colors"
+                        >
+                          View Results
+                        </Link>
+                      )}
                       <button 
                         onClick={(e) => handleQuizDownload(e, quiz)}
                         className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
@@ -360,7 +427,77 @@ export default function SubjectDetail() {
           </div>
         )}
 
+        {activeTab === 'students' && (
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-800">Enrolled Students</h2>
+              <p className="text-slate-500 text-sm">Manage student access to this subject's quizzes.</p>
+            </div>
+            
+            <form onSubmit={handleEnrollStudent} className="flex gap-4 items-end bg-slate-50 p-4 rounded-lg border border-slate-200">
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-slate-700 mb-1">Name</label>
+                <input
+                  type="text"
+                  required
+                  value={enrollForm.name}
+                  onChange={(e) => setEnrollForm({ ...enrollForm, name: e.target.value })}
+                  className="w-full rounded-md border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                  placeholder="Student Name"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
+                <input
+                  type="email"
+                  required
+                  value={enrollForm.email}
+                  onChange={(e) => setEnrollForm({ ...enrollForm, email: e.target.value })}
+                  className="w-full rounded-md border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                  placeholder="student@example.com"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={enrolling}
+                className="bg-indigo-600 text-white px-4 py-2 rounded-md font-medium hover:bg-indigo-700 disabled:opacity-50"
+              >
+                Enroll Student
+              </button>
+            </form>
 
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <table className="min-w-full divide-y divide-slate-200">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Name</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Email</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Joined</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-slate-200">
+                  {students.length === 0 ? (
+                    <tr>
+                      <td colSpan="3" className="px-6 py-8 text-center text-slate-500">
+                        No students enrolled yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    students.map(student => (
+                      <tr key={student.id}>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900">{student.name || 'N/A'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">{student.email}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">
+                          {new Date(student.created_at).toLocaleDateString()}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       <ConstructQuizModal 

@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from core.config import settings
 from core.database import init_db_sync
 from core.qdrant_setup import ensure_collection_exists
-from routers import auth_router, management, learning
+from routers import auth_router, management, learning, student
 
 
 # ── Lifespan (startup / shutdown hooks) ─────────────────────
@@ -82,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router.router)
     app.include_router(management.router)
     app.include_router(learning.router)
+    app.include_router(student.router)
 
     # ── Global exception handler ──────────────────────────
     # In Starlette 0.37.x, unhandled exceptions are caught by

@@ -1,58 +1,71 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { CheckCircle2 } from 'lucide-react';
+import { api, getApiErrorMessage } from '../../api/client';
+import toast from 'react-hot-toast';
 
 export default function QuizTaker() {
   const { id } = useParams();
   const navigate = useNavigate();
   
-  // Mock Data mimicking the secure API response (NO is_correct fields)
-  const quiz = {
-    id: 1,
-    title: 'Pipelining and Hazards',
-    questions: [
-      {
-        id: 101,
-        question_text: 'What kind of hazard occurs when an instruction depends on the result of a previous instruction still in the pipeline?',
-        marks: 1.0,
-        options: [
-          { id: 201, option_text: 'Structural Hazard' },
-          { id: 202, option_text: 'Data Hazard' },
-          { id: 203, option_text: 'Control Hazard' },
-        ],
-      },
-      {
-         id: 102,
-         question_text: 'Branch prediction is a technique primarily used to minimize which type of hazard?',
-         marks: 1.0,
-         options: [
-           { id: 204, option_text: 'Data Hazard' },
-           { id: 205, option_text: 'Control Hazard' },
-           { id: 206, option_text: 'Structural Hazard' },
-         ]
-      }
-    ],
-  };
-
+  const [quiz, setQuiz] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [answers, setAnswers] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [scoreData, setScoreData] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    fetchQuiz();
+  }, [id]);
+
+  const fetchQuiz = async () => {
+    try {
+      const data = await api.getStudentQuiz(id);
+      setQuiz(data);
+      if (data.attempted) {
+        setSubmitted(true);
+        setScoreData({ score: data.score, total: data.total_questions });
+      }
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Failed to fetch quiz'));
+      navigate('/student/dashboard');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleSelect = (qId, oId) => {
     if (submitted) return;
     setAnswers({ ...answers, [qId]: oId });
   };
 
-  const submitQuiz = () => {
-    // In a real app, this sends `answers` payload to POST /learning/quizzes/{id}/attempts
-    // Here we just mock the returned score response
-    setSubmitted(true);
-    setScoreData({
-      score: 2.0,
-      total: 2.0,
-      message: 'Great job!'
-    });
+  const submitQuiz = async () => {
+    setSubmitting(true);
+    const toastId = toast.loading('Submitting quiz...');
+    try {
+      // API expects array of { question_id, selected_option_id }
+      const payload = Object.entries(answers).map(([qId, oId]) => ({
+        question_id: parseInt(qId, 10),
+        selected_option_id: parseInt(oId, 10)
+      }));
+      
+      const response = await api.submitQuiz(id, { answers: payload });
+      setSubmitted(true);
+      setScoreData({
+        score: response.score,
+        total: quiz.questions.length,
+      });
+      toast.success('Quiz submitted successfully!', { id: toastId });
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Failed to submit quiz'), { id: toastId });
+    } finally {
+      setSubmitting(false);
+    }
   };
+
+  if (loading) return <div className="p-8 text-center text-slate-500">Loading quiz...</div>;
+  if (!quiz) return null;
 
   if (submitted && scoreData) {
     return (
@@ -131,10 +144,10 @@ export default function QuizTaker() {
       <div className="flex justify-end pt-4 border-t border-slate-200">
          <button 
            onClick={submitQuiz}
-           disabled={Object.keys(answers).length < quiz.questions.length}
+           disabled={submitting || Object.keys(answers).length < quiz.questions.length}
            className="bg-indigo-600 text-white px-8 py-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
          >
-           Submit Attempt
+           {submitting ? 'Submitting...' : 'Submit Attempt'}
          </button>
       </div>
     </div>

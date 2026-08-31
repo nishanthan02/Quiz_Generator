@@ -69,6 +69,14 @@ export const api = {
     const response = await apiClient.post('/management/subjects', data);
     return response.data;
   },
+  updateSubject: async (subjectId, data) => {
+    const response = await apiClient.put(`/management/subjects/${subjectId}`, data);
+    return response.data;
+  },
+  deleteSubject: async (subjectId) => {
+    const response = await apiClient.delete(`/management/subjects/${subjectId}`);
+    return response.data;
+  },
   uploadDocument: async (subjectId, file, options = {}) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -110,12 +118,46 @@ export const api = {
     const response = await apiClient.get(`/management/quizzes/${quizId}`);
     return response.data;
   },
-  updateQuiz: async (quizId, data) => {
+  updateQuizBulk: async (quizId, data) => {
     const response = await apiClient.put(`/management/quizzes/${quizId}/bulk`, data);
+    return response.data;
+  },
+  updateQuiz: async (quizId, data) => {
+    const response = await apiClient.put(`/management/quizzes/${quizId}`, data);
     return response.data;
   },
   deleteQuiz: async (quizId) => {
     const response = await apiClient.delete(`/management/quizzes/${quizId}`);
+    return response.data;
+  },
+  enrollStudent: async (subjectId, data) => {
+    const response = await apiClient.post(`/management/subjects/${subjectId}/enroll`, data);
+    return response.data;
+  },
+  getEnrolledStudents: async (subjectId) => {
+    const response = await apiClient.get(`/management/subjects/${subjectId}/students`);
+    return response.data;
+  },
+  getQuizResults: async (quizId) => {
+    const response = await apiClient.get(`/management/quizzes/${quizId}/results`);
+    return response.data;
+  },
+
+  // --- Student ---
+  getStudentSubjects: async () => {
+    const response = await apiClient.get('/student/subjects');
+    return response.data;
+  },
+  getStudentSubjectQuizzes: async (subjectId) => {
+    const response = await apiClient.get(`/student/subjects/${subjectId}/quizzes`);
+    return response.data;
+  },
+  getStudentQuiz: async (quizId) => {
+    const response = await apiClient.get(`/student/quizzes/${quizId}`);
+    return response.data;
+  },
+  submitQuiz: async (quizId, answers) => {
+    const response = await apiClient.post(`/student/quizzes/${quizId}/submit`, answers);
     return response.data;
   },
 

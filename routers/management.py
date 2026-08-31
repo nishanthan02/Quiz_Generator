@@ -538,6 +538,16 @@ async def update_quiz(
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found or unauthorized")
         
+    if quiz.status == "published" and quiz_in.status != "published":
+         # Prevent un-publishing if we want to be strict, or maybe allow it? We'll just lock edits.
+         # Actually, we can just block editing details if it's already published.
+         pass
+         
+    # If it was already published, block modifying anything EXCEPT status (maybe) or block everything.
+    # Let's just say if it's published, they can't change title/description.
+    if quiz.status == "published" and (quiz_in.title or quiz_in.description):
+         raise HTTPException(status_code=400, detail="Cannot edit a published quiz.")
+
     update_data = quiz_in.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(quiz, key, value)
@@ -559,6 +569,9 @@ async def bulk_update_quiz(
     quiz = result.scalars().first()
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found")
+
+    if quiz.status == "published":
+        raise HTTPException(status_code=400, detail="Cannot edit questions of a published quiz.")
 
     # Update metadata
     quiz.title = quiz_in.title
@@ -614,9 +627,129 @@ async def delete_quiz(
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found or unauthorized")
         
+    if quiz.status == "published":
+        raise HTTPException(status_code=400, detail="Cannot delete a published quiz.")
+
     await db.delete(quiz)
     await db.commit()
     return {"message": "Quiz deleted successfully"}
+
+
+# ── Students and Enrollments ─────────────────────────────
+
+class EnrollRequest(BaseModel):
+    email: str
+    name: Optional[str] = "Student"
+
+@router.post("/subjects/{subject_id}/enroll")
+async def enroll_student(
+    subject_id: int,
+    req: EnrollRequest,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    # Verify owner
+    sub_res = await db.execute(select(Subject).where(Subject.id == subject_id, Subject.faculty_id == current_user.id))
+    if not sub_res.scalars().first():
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    # Find user by email
+    user_res = await db.execute(select(User).where(User.email == req.email))
+    student = user_res.scalars().first()
+
+    status_msg = "enrolled"
+    if student:
+        if student.role == "faculty":
+            raise HTTPException(status_code=409, detail="Cannot enroll a faculty member as a student.")
+    else:
+        # Create student with default password "student123"
+        from core.security import get_password_hash
+        from core.models import UserRole
+        student = User(
+            email=req.email,
+            name=req.name,
+            hashed_password=get_password_hash("student123"),
+            role=UserRole.student
+        )
+        db.add(student)
+        await db.flush()
+        status_msg = "created"
+
+    # Enroll
+    from core.models import StudentEnrollment
+    enroll_res = await db.execute(
+        select(StudentEnrollment).where(
+            StudentEnrollment.student_id == student.id, 
+            StudentEnrollment.subject_id == subject_id
+        )
+    )
+    if enroll_res.scalars().first():
+        return {"status": "already_enrolled"}
+
+    new_enrollment = StudentEnrollment(student_id=student.id, subject_id=subject_id)
+    db.add(new_enrollment)
+    await db.commit()
+    return {"status": status_msg}
+
+@router.get("/subjects/{subject_id}/students")
+async def get_enrolled_students(
+    subject_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    sub_res = await db.execute(select(Subject).where(Subject.id == subject_id, Subject.faculty_id == current_user.id))
+    if not sub_res.scalars().first():
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    from core.models import StudentEnrollment
+    result = await db.execute(
+        select(User)
+        .join(StudentEnrollment, StudentEnrollment.student_id == User.id)
+        .where(StudentEnrollment.subject_id == subject_id)
+    )
+    students = result.scalars().all()
+    return [{"id": s.id, "name": s.name, "email": s.email} for s in students]
+
+@router.get("/quizzes/{quiz_id}/results")
+async def get_quiz_results(
+    quiz_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    result = await db.execute(
+        select(Quiz).join(Subject).where(Quiz.id == quiz_id, Subject.faculty_id == current_user.id)
+    )
+    quiz = result.scalars().first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    # Get all students enrolled in this subject
+    from core.models import StudentEnrollment
+    students_res = await db.execute(
+        select(User)
+        .join(StudentEnrollment, StudentEnrollment.student_id == User.id)
+        .where(StudentEnrollment.subject_id == quiz.subject_id)
+    )
+    enrolled_students = students_res.scalars().all()
+
+    # Get attempts
+    attempts_res = await db.execute(
+        select(StudentAttempt).where(StudentAttempt.quiz_id == quiz_id)
+    )
+    attempts = {a.student_id: a for a in attempts_res.scalars().all()}
+
+    results = []
+    for s in enrolled_students:
+        attempt = attempts.get(s.id)
+        results.append({
+            "student_id": s.id,
+            "name": s.name,
+            "email": s.email,
+            "attempted": attempt is not None,
+            "score": attempt.score if attempt else None,
+            "completed_at": attempt.completed_at if attempt else None,
+        })
+    return results
 
 
 @router.get("/subjects/{subject_id}/gradebook")

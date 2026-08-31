@@ -20,7 +20,9 @@ import QuizEditor from './pages/faculty/QuizEditor';
 
 // Student Pages
 import StudentDashboard from './pages/student/Dashboard';
+import StudentSubjectDetail from './pages/student/SubjectDetail';
 import QuizTaker from './pages/student/QuizTaker';
+import QuizResults from './pages/faculty/QuizResults';
 
 // Sub-router guard for authenticated users
 const ProtectedRoute = ({ allowedRoles }) => {
@@ -68,11 +70,13 @@ function App() {
               <Route path="/faculty/dashboard" element={<FacultyDashboard />} />
               <Route path="/faculty/subject/:id" element={<SubjectDetail />} />
               <Route path="/faculty/quiz/:id/edit" element={<QuizEditor />} />
+              <Route path="/faculty/quiz/:id/results" element={<QuizResults />} />
             </Route>
             
             {/* Student Routes */}
             <Route element={<ProtectedRoute allowedRoles={['student', 'admin']} />}>
               <Route path="/student/dashboard" element={<StudentDashboard />} />
+              <Route path="/student/subject/:id" element={<StudentSubjectDetail />} />
               <Route path="/student/quiz/:id" element={<QuizTaker />} />
             </Route>
           </Route>
