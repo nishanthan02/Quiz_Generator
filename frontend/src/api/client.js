@@ -142,6 +142,18 @@ export const api = {
     const response = await apiClient.get(`/management/quizzes/${quizId}/results`);
     return response.data;
   },
+  downloadSimpleReport: async (quizId) => {
+    const response = await apiClient.get(`/management/quizzes/${quizId}/report/simple`, {
+      responseType: 'blob',
+    });
+    return response;
+  },
+  downloadDetailedReport: async (quizId) => {
+    const response = await apiClient.get(`/management/quizzes/${quizId}/report/detailed`, {
+      responseType: 'blob',
+    });
+    return response;
+  },
 
   // --- Student ---
   getStudentSubjects: async () => {

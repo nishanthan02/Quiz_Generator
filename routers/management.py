@@ -752,6 +752,207 @@ async def get_quiz_results(
     return results
 
 
+# ── Excel Report: Simple (Name + Score) ─────────────────────────────
+
+@router.get("/quizzes/{quiz_id}/report/simple")
+async def download_simple_report(
+    quiz_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    """Download a simple Excel report: Student Name, Email, Score, Status, Submitted At."""
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from core.models import StudentEnrollment
+
+    # Verify quiz ownership
+    result = await db.execute(
+        select(Quiz).join(Subject).where(Quiz.id == quiz_id, Subject.faculty_id == current_user.id)
+    )
+    quiz = result.scalars().first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    # Get total possible marks
+    q_res = await db.execute(select(Question).where(Question.quiz_id == quiz_id))
+    questions = q_res.scalars().all()
+    total_marks = sum(q.marks for q in questions)
+
+    # Get enrolled students
+    students_res = await db.execute(
+        select(User)
+        .join(StudentEnrollment, StudentEnrollment.student_id == User.id)
+        .where(StudentEnrollment.subject_id == quiz.subject_id)
+    )
+    enrolled_students = students_res.scalars().all()
+
+    # Get attempts
+    attempts_res = await db.execute(select(StudentAttempt).where(StudentAttempt.quiz_id == quiz_id))
+    attempts = {a.student_id: a for a in attempts_res.scalars().all()}
+
+    # Build Excel workbook
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Quiz Results"
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+    center = Alignment(horizontal="center")
+
+    headers = ["#", "Student Name", "Email", "Score", f"Out of ({total_marks})", "Percentage", "Status", "Submitted At"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center
+
+    for idx, s in enumerate(enrolled_students, 1):
+        attempt = attempts.get(s.id)
+        score = attempt.score if attempt else None
+        pct = f"{(score / total_marks * 100):.1f}%" if (attempt and total_marks > 0) else "-"
+        status = "Attempted" if attempt else "Not Attempted"
+        submitted = attempt.completed_at.strftime("%d-%m-%Y %H:%M") if (attempt and attempt.completed_at) else "-"
+        ws.append([idx, s.name or "N/A", s.email, score if score is not None else "-", total_marks, pct, status, submitted])
+
+    for col in ws.columns:
+        max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+        ws.column_dimensions[col[0].column_letter].width = max_len + 4
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    safe_title = quiz.title.replace(" ", "_")
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{safe_title}_simple_report.xlsx"'}
+    )
+
+
+# ── Excel Report: Detailed (Per Question Answer) ─────────────────────────────
+
+@router.get("/quizzes/{quiz_id}/report/detailed")
+async def download_detailed_report(
+    quiz_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    """Download a detailed Excel report: each student's answer per question, marked correct/wrong."""
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from core.models import StudentEnrollment, AttemptAnswer
+
+    result = await db.execute(
+        select(Quiz).join(Subject).where(Quiz.id == quiz_id, Subject.faculty_id == current_user.id)
+    )
+    quiz = result.scalars().first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    # Load questions + options
+    q_res = await db.execute(
+        select(Question)
+        .options(selectinload(Question.options))
+        .where(Question.quiz_id == quiz_id)
+        .order_by(Question.id)
+    )
+    questions = q_res.scalars().all()
+    total_marks = sum(q.marks for q in questions)
+
+    option_map = {}
+    for q in questions:
+        for opt in q.options:
+            option_map[opt.id] = opt
+
+    # Get enrolled students
+    students_res = await db.execute(
+        select(User)
+        .join(StudentEnrollment, StudentEnrollment.student_id == User.id)
+        .where(StudentEnrollment.subject_id == quiz.subject_id)
+    )
+    enrolled_students = students_res.scalars().all()
+
+    # Get attempts
+    attempts_res = await db.execute(select(StudentAttempt).where(StudentAttempt.quiz_id == quiz_id))
+    attempt_map = {a.student_id: a for a in attempts_res.scalars().all()}
+
+    # Get all answers for this quiz grouped by attempt
+    answers_res = await db.execute(
+        select(AttemptAnswer)
+        .join(StudentAttempt, StudentAttempt.id == AttemptAnswer.attempt_id)
+        .where(StudentAttempt.quiz_id == quiz_id)
+    )
+    answers_by_attempt = {}
+    for ans in answers_res.scalars().all():
+        answers_by_attempt.setdefault(ans.attempt_id, {})[ans.question_id] = ans
+
+    # Build workbook
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Detailed Results"
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+    green_fill = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")
+    red_fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+
+    fixed_headers = ["#", "Student Name", "Email", "Total Score", f"Out of ({total_marks})", "Percentage", "Status"]
+    q_headers = [f"Q{i+1}: {q.question_text[:40]}..." if len(q.question_text) > 40 else f"Q{i+1}: {q.question_text}" for i, q in enumerate(questions)]
+    ws.append(fixed_headers + q_headers)
+
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+
+    for idx, s in enumerate(enrolled_students, 1):
+        attempt = attempt_map.get(s.id)
+        score = attempt.score if attempt else None
+        pct = f"{(score / total_marks * 100):.1f}%" if (attempt and total_marks > 0) else "-"
+        status = "Attempted" if attempt else "Not Attempted"
+
+        row = [idx, s.name or "N/A", s.email, score if score is not None else "-", total_marks, pct, status]
+
+        if attempt:
+            student_answers = answers_by_attempt.get(attempt.id, {})
+            for q in questions:
+                ans = student_answers.get(q.id)
+                if ans:
+                    selected_opt = option_map.get(ans.selected_option_id)
+                    row.append(f"{'✓' if selected_opt and selected_opt.is_correct else '✗'} {selected_opt.option_text if selected_opt else 'N/A'}")
+                else:
+                    row.append("Not answered")
+        else:
+            row += ["-"] * len(questions)
+
+        ws.append(row)
+
+        # Color-code answer cells: green = correct, red = wrong
+        if attempt:
+            student_answers = answers_by_attempt.get(attempt.id, {})
+            for col_idx, q in enumerate(questions, start=len(fixed_headers) + 1):
+                ans = student_answers.get(q.id)
+                cell = ws.cell(row=ws.max_row, column=col_idx)
+                if ans:
+                    selected_opt = option_map.get(ans.selected_option_id)
+                    cell.fill = green_fill if (selected_opt and selected_opt.is_correct) else red_fill
+
+    for col in ws.columns:
+        max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 50)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    safe_title = quiz.title.replace(" ", "_")
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{safe_title}_detailed_report.xlsx"'}
+    )
+
+
 @router.get("/subjects/{subject_id}/gradebook")
 async def get_gradebook(
     subject_id: int, 
