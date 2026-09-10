@@ -691,6 +691,111 @@ async def enroll_student(
     await db.commit()
     return {"status": status_msg}
 
+
+# ── Bulk Enroll via CSV ─────────────────────────────
+
+@router.post("/subjects/{subject_id}/enroll/bulk")
+async def bulk_enroll_students(
+    subject_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    """
+    Upload a CSV with columns: name, email
+    Returns a summary of each row: created / enrolled / already_enrolled / skipped (faculty) / error
+    """
+    import csv, io
+    from core.security import get_password_hash
+    from core.models import UserRole, StudentEnrollment
+
+    # Verify subject ownership
+    sub_res = await db.execute(select(Subject).where(Subject.id == subject_id, Subject.faculty_id == current_user.id))
+    if not sub_res.scalars().first():
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    # Read and parse CSV
+    contents = await file.read()
+    try:
+        text = contents.decode("utf-8-sig")  # utf-8-sig handles Excel BOM
+    except UnicodeDecodeError:
+        text = contents.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+
+    # Normalize headers (strip whitespace, lowercase)
+    if reader.fieldnames is None:
+        raise HTTPException(status_code=400, detail="CSV file appears to be empty.")
+
+    normalized_fields = [f.strip().lower() for f in reader.fieldnames]
+    if "email" not in normalized_fields:
+        raise HTTPException(status_code=400, detail="CSV must have an 'email' column.")
+
+    results = []
+    for row in reader:
+        # Normalize keys
+        row = {k.strip().lower(): v.strip() for k, v in row.items()}
+        email = row.get("email", "").strip()
+        name = row.get("name", "").strip() or "Student"
+
+        if not email:
+            results.append({"email": email, "name": name, "status": "skipped", "reason": "Empty email"})
+            continue
+
+        try:
+            # Find or create user
+            user_res = await db.execute(select(User).where(User.email == email))
+            student = user_res.scalars().first()
+            row_status = "enrolled"
+
+            if student:
+                if student.role == UserRole.faculty:
+                    results.append({"email": email, "name": name, "status": "skipped", "reason": "Is a faculty account"})
+                    continue
+            else:
+                student = User(
+                    email=email,
+                    name=name,
+                    hashed_password=get_password_hash("student123"),
+                    role=UserRole.student
+                )
+                db.add(student)
+                await db.flush()
+                row_status = "created"
+
+            # Check if already enrolled
+            enroll_res = await db.execute(
+                select(StudentEnrollment).where(
+                    StudentEnrollment.student_id == student.id,
+                    StudentEnrollment.subject_id == subject_id
+                )
+            )
+            if enroll_res.scalars().first():
+                results.append({"email": email, "name": student.name, "status": "already_enrolled"})
+                continue
+
+            db.add(StudentEnrollment(student_id=student.id, subject_id=subject_id))
+            await db.flush()
+            results.append({"email": email, "name": student.name, "status": row_status})
+
+        except Exception as e:
+            await db.rollback()
+            results.append({"email": email, "name": name, "status": "error", "reason": str(e)})
+
+    await db.commit()
+
+    summary = {
+        "total": len(results),
+        "created": sum(1 for r in results if r["status"] == "created"),
+        "enrolled": sum(1 for r in results if r["status"] == "enrolled"),
+        "already_enrolled": sum(1 for r in results if r["status"] == "already_enrolled"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "errors": sum(1 for r in results if r["status"] == "error"),
+        "rows": results
+    }
+    return summary
+
+
 @router.get("/subjects/{subject_id}/students")
 async def get_enrolled_students(
     subject_id: int,
@@ -708,7 +813,37 @@ async def get_enrolled_students(
         .where(StudentEnrollment.subject_id == subject_id)
     )
     students = result.scalars().all()
-    return [{"id": s.id, "name": s.name, "email": s.email} for s in students]
+    return [{"id": s.id, "name": s.name, "email": s.email, "created_at": s.created_at.isoformat() if s.created_at else None} for s in students]
+
+
+class RemoveStudentsRequest(BaseModel):
+    student_ids: List[int]
+
+@router.delete("/subjects/{subject_id}/students")
+async def remove_enrolled_students(
+    subject_id: int,
+    req: RemoveStudentsRequest,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    """Remove one or more students from a subject's enrollment."""
+    from core.models import StudentEnrollment
+
+    # Verify subject ownership
+    sub_res = await db.execute(select(Subject).where(Subject.id == subject_id, Subject.faculty_id == current_user.id))
+    if not sub_res.scalars().first():
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    # Delete enrollments for all given student IDs in one query
+    await db.execute(
+        StudentEnrollment.__table__.delete().where(
+            StudentEnrollment.student_id.in_(req.student_ids),
+            StudentEnrollment.subject_id == subject_id
+        )
+    )
+    await db.commit()
+    return {"removed": len(req.student_ids)}
+
 
 @router.get("/quizzes/{quiz_id}/results")
 async def get_quiz_results(

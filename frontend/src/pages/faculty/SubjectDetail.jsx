@@ -20,6 +20,11 @@ export default function SubjectDetail() {
 
   const [enrollForm, setEnrollForm] = useState({ name: '', email: '' });
   const [enrolling, setEnrolling] = useState(false);
+  const [bulkUploading, setBulkUploading] = useState(false);
+  const [bulkResult, setBulkResult] = useState(null);
+  const bulkInputRef = useRef(null);
+  const [selectedStudents, setSelectedStudents] = useState([]);
+  const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
     fetchSubjectDetail();
@@ -64,6 +69,57 @@ export default function SubjectDetail() {
       toast.error(getApiErrorMessage(err, 'Failed to enroll student'), { id: loadingToast });
     } finally {
       setEnrolling(false);
+    }
+  };
+
+  const handleBulkEnroll = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBulkUploading(true);
+    setBulkResult(null);
+    const loadingToast = toast.loading('Processing CSV...');
+    try {
+      const result = await api.bulkEnrollStudents(id, file);
+      setBulkResult(result);
+      toast.success(`Done! ${result.created} created, ${result.enrolled} enrolled.`, { id: loadingToast });
+      fetchStudents();
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Failed to process CSV'), { id: loadingToast });
+    } finally {
+      setBulkUploading(false);
+      if (bulkInputRef.current) bulkInputRef.current.value = '';
+    }
+  };
+
+  const toggleStudent = (studentId) => {
+    setSelectedStudents(prev =>
+      prev.includes(studentId) ? prev.filter(id => id !== studentId) : [...prev, studentId]
+    );
+  };
+
+  const toggleAllStudents = (studentList) => {
+    if (selectedStudents.length === studentList.length) {
+      setSelectedStudents([]);
+    } else {
+      setSelectedStudents(studentList.map(s => s.id));
+    }
+  };
+
+  const handleRemoveStudents = async () => {
+    if (selectedStudents.length === 0) return;
+    const confirmMsg = `Remove ${selectedStudents.length} student(s) from this subject?`;
+    if (!window.confirm(confirmMsg)) return;
+    setRemoving(true);
+    const toastId = toast.loading(`Removing ${selectedStudents.length} student(s)...`);
+    try {
+      await api.removeStudents(id, selectedStudents);
+      toast.success(`${selectedStudents.length} student(s) removed.`, { id: toastId });
+      setSelectedStudents([]);
+      fetchStudents();
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Failed to remove students'), { id: toastId });
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -429,10 +485,52 @@ export default function SubjectDetail() {
 
         {activeTab === 'students' && (
           <div className="space-y-6">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-800">Enrolled Students</h2>
-              <p className="text-slate-500 text-sm">Manage student access to this subject's quizzes.</p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-800">Enrolled Students</h2>
+                <p className="text-slate-500 text-sm">Manage student access to this subject's quizzes.</p>
+              </div>
+              {/* Bulk CSV Upload */}
+              <div>
+                <input
+                  type="file"
+                  accept=".csv"
+                  ref={bulkInputRef}
+                  onChange={handleBulkEnroll}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => bulkInputRef.current?.click()}
+                  disabled={bulkUploading}
+                  className="flex items-center space-x-2 px-4 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50"
+                >
+                  <UploadCloud className="w-4 h-4" />
+                  <span>{bulkUploading ? 'Processing...' : 'Bulk Upload CSV'}</span>
+                </button>
+                <p className="text-xs text-slate-400 mt-1 text-right">CSV format: name, email</p>
+              </div>
             </div>
+
+            {/* Bulk Upload Result Summary */}
+            {bulkResult && (
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-700">Bulk Upload Summary</h3>
+                  <button onClick={() => setBulkResult(null)} className="text-xs text-slate-400 hover:text-slate-600">Dismiss</button>
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full font-semibold">✓ {bulkResult.created} New accounts created & enrolled</span>
+                  <span className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded-full font-semibold">✓ {bulkResult.enrolled} Existing accounts enrolled</span>
+                  <span className="text-xs px-2 py-1 bg-amber-100 text-amber-700 rounded-full font-semibold">⚠ {bulkResult.already_enrolled} Already enrolled (skipped)</span>
+                  {bulkResult.skipped > 0 && <span className="text-xs px-2 py-1 bg-slate-100 text-slate-600 rounded-full font-semibold">⊘ {bulkResult.skipped} Skipped (invalid rows)</span>}
+                  {bulkResult.errors > 0 && <span className="text-xs px-2 py-1 bg-red-100 text-red-700 rounded-full font-semibold">✗ {bulkResult.errors} Errors</span>}
+                </div>
+                {/* Show per-row details only for skipped/errors */}
+                {bulkResult.rows.filter(r => r.status === 'error' || r.status === 'skipped').map((r, i) => (
+                  <p key={i} className="text-xs text-red-600">⚠ {r.email}: {r.reason}</p>
+                ))}
+              </div>
+            )}
             
             <form onSubmit={handleEnrollStudent} className="flex gap-4 items-end bg-slate-50 p-4 rounded-lg border border-slate-200">
               <div className="flex-1">
@@ -467,9 +565,30 @@ export default function SubjectDetail() {
             </form>
 
             <div className="border border-slate-200 rounded-lg overflow-hidden">
+              {/* Remove Selected Bar — shows only when something is checked */}
+              {selectedStudents.length > 0 && (
+                <div className="flex items-center justify-between px-4 py-2 bg-red-50 border-b border-red-100">
+                  <span className="text-sm text-red-700 font-medium">{selectedStudents.length} student(s) selected</span>
+                  <button
+                    onClick={handleRemoveStudents}
+                    disabled={removing}
+                    className="text-sm px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 transition-colors"
+                  >
+                    {removing ? 'Removing...' : `Remove Selected (${selectedStudents.length})`}
+                  </button>
+                </div>
+              )}
               <table className="min-w-full divide-y divide-slate-200">
                 <thead className="bg-slate-50">
                   <tr>
+                    <th className="px-4 py-3 w-10">
+                      <input
+                        type="checkbox"
+                        checked={students.length > 0 && selectedStudents.length === students.length}
+                        onChange={() => toggleAllStudents(students)}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                    </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Name</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Email</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Joined</th>
@@ -478,17 +597,28 @@ export default function SubjectDetail() {
                 <tbody className="bg-white divide-y divide-slate-200">
                   {students.length === 0 ? (
                     <tr>
-                      <td colSpan="3" className="px-6 py-8 text-center text-slate-500">
+                      <td colSpan="4" className="px-6 py-8 text-center text-slate-500">
                         No students enrolled yet.
                       </td>
                     </tr>
                   ) : (
                     students.map(student => (
-                      <tr key={student.id}>
+                      <tr
+                        key={student.id}
+                        className={selectedStudents.includes(student.id) ? 'bg-red-50' : 'hover:bg-slate-50'}
+                      >
+                        <td className="px-4 py-4">
+                          <input
+                            type="checkbox"
+                            checked={selectedStudents.includes(student.id)}
+                            onChange={() => toggleStudent(student.id)}
+                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                        </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900">{student.name || 'N/A'}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">{student.email}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">
-                          {new Date(student.created_at).toLocaleDateString()}
+                          {student.created_at ? new Date(student.created_at).toLocaleDateString() : '-'}
                         </td>
                       </tr>
                     ))

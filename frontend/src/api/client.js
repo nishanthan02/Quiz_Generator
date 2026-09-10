@@ -134,8 +134,24 @@ export const api = {
     const response = await apiClient.post(`/management/subjects/${subjectId}/enroll`, data);
     return response.data;
   },
+  bulkEnrollStudents: async (subjectId, csvFile) => {
+    const formData = new FormData();
+    formData.append('file', csvFile);
+    const response = await apiClient.post(
+      `/management/subjects/${subjectId}/enroll/bulk`,
+      formData,
+      { headers: { 'Content-Type': undefined } }
+    );
+    return response.data;
+  },
   getEnrolledStudents: async (subjectId) => {
     const response = await apiClient.get(`/management/subjects/${subjectId}/students`);
+    return response.data;
+  },
+  removeStudents: async (subjectId, studentIds) => {
+    const response = await apiClient.delete(`/management/subjects/${subjectId}/students`, {
+      data: { student_ids: studentIds }
+    });
     return response.data;
   },
   getQuizResults: async (quizId) => {
