@@ -1,6 +1,6 @@
 # core/models.py
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, Float, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text, Float, Enum as SQLEnum, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 import enum
@@ -152,3 +152,24 @@ class AttemptAnswer(Base):
     attempt = relationship("StudentAttempt", back_populates="answers")
     question = relationship("Question")
     selected_option = relationship("Option")
+
+
+class StudentFeedback(Base):
+    __tablename__ = "student_feedback"
+    __table_args__ = (
+        UniqueConstraint("quiz_id", "student_id", name="uq_feedback_quiz_student"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    quiz_id = Column(Integer, ForeignKey("quizzes.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    ai_text = Column(Text, nullable=True)       # raw LLM output
+    final_text = Column(Text, nullable=True)    # approved/edited text
+    status = Column(String, default="pending")  # pending|ready|approved|skipped|failed
+    error_msg = Column(Text, nullable=True)     # reason if status=failed
+    seen = Column(Boolean, default=False)       # cleared only via POST /mark-seen
+    created_at = Column(DateTime, default=datetime.utcnow)
+    approved_at = Column(DateTime, nullable=True)
+
+    quiz = relationship("Quiz")
+    student = relationship("User")

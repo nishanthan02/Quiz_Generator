@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ShieldAlert, Home, BookOpen, LogOut } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { cn } from '../../lib/utils';
+import { api } from '../../api/client';
 
 export default function Navbar() {
   const { user, logout } = useAuth();
@@ -16,12 +17,23 @@ export default function Navbar() {
 
 
 
+  const [unreadCount, setUnreadCount] = React.useState(0);
+
+  React.useEffect(() => {
+    if (user?.role === 'student') {
+      api.getFeedbackUnreadCount().then(res => setUnreadCount(res.count)).catch(() => {});
+    }
+  }, [user, location.pathname]);
+
   const basePath = user?.role === 'student' ? '/student/dashboard' : '/faculty/dashboard';
 
   const navItems = [
     { name: 'Home', icon: Home, path: '/' },
     { name: 'Subjects', icon: BookOpen, path: basePath },
   ];
+  if (user?.role === 'student') {
+    navItems.push({ name: 'Feedback', icon: BookOpen, path: '/student/feedback', badge: unreadCount });
+  }
 
   return (
     <div className="w-full bg-white border-b border-slate-200 flex items-center justify-between px-6 py-3 shadow-sm z-10 shrink-0">
@@ -49,6 +61,11 @@ export default function Navbar() {
                 >
                   <Icon className={cn("w-4 h-4 mr-2", isActive ? "text-indigo-600" : "text-slate-400")} />
                   {item.name}
+                  {item.badge > 0 && (
+                    <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs font-bold leading-none text-white bg-red-500 rounded-full">
+                      {item.badge}
+                    </span>
+                  )}
                 </Link>
               );
             })}

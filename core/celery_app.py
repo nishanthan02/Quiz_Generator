@@ -53,6 +53,7 @@ def create_celery_app() -> Celery:
         task_routes={
             "workers.document_tasks.*": {"queue": "documents"},
             "workers.quiz_tasks.*":     {"queue": "quizzes"},
+            "workers.feedback_tasks.*": {"queue": "feedback"},
         },
 
         # Retry / reliability settings
@@ -64,7 +65,7 @@ def create_celery_app() -> Celery:
         result_expires=86_400,
 
         # Auto-discover tasks in the workers package
-        include=["workers.document_tasks", "workers.quiz_tasks"],
+        include=["workers.document_tasks", "workers.quiz_tasks", "workers.feedback_tasks"],
     )
 
     return app

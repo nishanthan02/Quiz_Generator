@@ -1173,3 +1173,195 @@ async def generate_quiz_for_subject(
         raise HTTPException(status_code=500, detail=str(e))
         
     return {"message": "Quiz generation started", "quiz_id": new_quiz.id}
+
+
+# ── AI Feedback System ─────────────────────────────────────
+
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+class FeedbackGenerateRequest(BaseModel):
+    student_ids: Optional[List[int]] = None
+    score_threshold: Optional[float] = None
+
+@router.post("/quizzes/{quiz_id}/feedback/generate")
+async def generate_feedback(
+    quiz_id: int,
+    req: FeedbackGenerateRequest,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    from core.models import StudentFeedback, StudentAttempt, Subject
+    from workers.feedback_tasks import generate_student_feedback
+
+    # Verify quiz ownership
+    quiz_res = await db.execute(
+        select(Quiz).join(Subject).where(Quiz.id == quiz_id, Subject.faculty_id == current_user.id)
+    )
+    quiz = quiz_res.scalars().first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    # Determine students to process
+    query = select(StudentAttempt).where(StudentAttempt.quiz_id == quiz_id)
+    if req.student_ids:
+        query = query.where(StudentAttempt.student_id.in_(req.student_ids))
+    
+    attempts_res = await db.execute(query)
+    attempts = attempts_res.scalars().all()
+
+    students_to_process = []
+    if req.score_threshold is not None:
+        total_marks = sum(q.marks for q in quiz.questions) if quiz.questions else 1
+        for a in attempts:
+            pct = (a.score / total_marks) * 100 if total_marks else 0
+            if pct < req.score_threshold:
+                students_to_process.append(a.student_id)
+    else:
+        students_to_process = [a.student_id for a in attempts]
+
+    if not students_to_process:
+        return {"queued": 0, "skipped": 0, "message": "No students matched criteria"}
+
+    if len(students_to_process) > 200:
+        raise HTTPException(status_code=400, detail="Cannot generate for more than 200 students at once.")
+
+    # Atomic upsert — Postgres ON CONFLICT DO UPDATE with RETURNING
+    stmt = pg_insert(StudentFeedback).values([
+        {"quiz_id": quiz_id, "student_id": sid, "status": "pending", "error_msg": None}
+        for sid in students_to_process
+    ]).on_conflict_do_update(
+        index_elements=["quiz_id", "student_id"],
+        set_={"status": "pending", "error_msg": None},
+        where=(StudentFeedback.status == "failed")   # skip ready/approved/pending
+    ).returning(StudentFeedback.id, StudentFeedback.student_id)
+
+    result = await db.execute(stmt)
+    newly_pending = result.fetchall()
+    await db.commit()
+
+    # Queue Celery tasks ONLY for rows that came back from RETURNING
+    for feedback_id, student_id in newly_pending:
+        generate_student_feedback.delay(quiz_id, student_id, feedback_id)
+
+    return {
+        "queued": len(newly_pending),
+        "skipped": len(students_to_process) - len(newly_pending)
+    }
+
+@router.get("/quizzes/{quiz_id}/feedback/status")
+async def get_feedback_status(
+    quiz_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    from core.models import StudentFeedback, Subject
+    # Verify owner
+    quiz_res = await db.execute(
+        select(Quiz).join(Subject).where(Quiz.id == quiz_id, Subject.faculty_id == current_user.id)
+    )
+    if not quiz_res.scalars().first():
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    fb_res = await db.execute(
+        select(StudentFeedback).where(StudentFeedback.quiz_id == quiz_id)
+    )
+    feedbacks = fb_res.scalars().all()
+    
+    return [
+        {
+            "id": f.id,
+            "student_id": f.student_id,
+            "status": f.status,
+            "ai_text": f.ai_text,
+            "final_text": f.final_text,
+            "error_msg": f.error_msg
+        } for f in feedbacks
+    ]
+
+class ReviewItem(BaseModel):
+    student_id: int
+    action: str  # "approve" | "skip"
+    edited_text: Optional[str] = None
+
+class FeedbackReviewRequest(BaseModel):
+    reviews: List[ReviewItem]
+
+@router.post("/quizzes/{quiz_id}/feedback/review")
+async def review_feedback(
+    quiz_id: int,
+    req: FeedbackReviewRequest,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    from core.models import StudentFeedback, Subject
+    from datetime import datetime
+    
+    # Verify owner
+    quiz_res = await db.execute(
+        select(Quiz).join(Subject).where(Quiz.id == quiz_id, Subject.faculty_id == current_user.id)
+    )
+    if not quiz_res.scalars().first():
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    student_ids = [r.student_id for r in req.reviews]
+    fb_res = await db.execute(
+        select(StudentFeedback).where(
+            StudentFeedback.quiz_id == quiz_id, 
+            StudentFeedback.student_id.in_(student_ids)
+        )
+    )
+    feedbacks = {f.student_id: f for f in fb_res.scalars().all()}
+
+    for item in req.reviews:
+        fb = feedbacks.get(item.student_id)
+        if not fb:
+            continue
+        if item.action == "approve":
+            fb.status = "approved"
+            fb.final_text = item.edited_text or fb.ai_text
+            fb.approved_at = datetime.utcnow()
+        elif item.action == "skip":
+            fb.status = "skipped"
+        elif item.action == "delete":
+            await db.delete(fb)
+            
+    await db.commit()
+    return {"message": "Reviews processed"}
+
+
+class RetryRequest(BaseModel):
+    student_id: int
+
+@router.post("/quizzes/{quiz_id}/feedback/retry")
+async def retry_feedback(
+    quiz_id: int,
+    req: RetryRequest,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_faculty)
+):
+    from core.models import StudentFeedback, Subject
+    from workers.feedback_tasks import generate_student_feedback
+    
+    # Verify owner
+    quiz_res = await db.execute(
+        select(Quiz).join(Subject).where(Quiz.id == quiz_id, Subject.faculty_id == current_user.id)
+    )
+    if not quiz_res.scalars().first():
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    fb_res = await db.execute(
+        select(StudentFeedback).where(
+            StudentFeedback.quiz_id == quiz_id,
+            StudentFeedback.student_id == req.student_id
+        )
+    )
+    fb = fb_res.scalars().first()
+    if not fb:
+        raise HTTPException(status_code=404, detail="Feedback record not found")
+
+    fb.status = "pending"
+    fb.error_msg = None
+    await db.commit()
+
+    generate_student_feedback.delay(quiz_id, req.student_id, fb.id)
+    return {"message": "Retried"}

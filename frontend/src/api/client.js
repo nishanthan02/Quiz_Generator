@@ -170,6 +170,22 @@ export const api = {
     });
     return response;
   },
+  generateFeedback: async (quizId, data) => {
+    const response = await apiClient.post(`/management/quizzes/${quizId}/feedback/generate`, data);
+    return response.data;
+  },
+  getFeedbackStatus: async (quizId) => {
+    const response = await apiClient.get(`/management/quizzes/${quizId}/feedback/status`);
+    return response.data;
+  },
+  reviewFeedback: async (quizId, reviews) => {
+    const response = await apiClient.post(`/management/quizzes/${quizId}/feedback/review`, { reviews });
+    return response.data;
+  },
+  retryFeedback: async (quizId, studentId) => {
+    const response = await apiClient.post(`/management/quizzes/${quizId}/feedback/retry`, { student_id: studentId });
+    return response.data;
+  },
 
   // --- Student ---
   getStudentSubjects: async () => {
@@ -186,6 +202,18 @@ export const api = {
   },
   submitQuiz: async (quizId, answers) => {
     const response = await apiClient.post(`/student/quizzes/${quizId}/submit`, answers);
+    return response.data;
+  },
+  getMyFeedback: async () => {
+    const response = await apiClient.get('/student/feedback');
+    return response.data;
+  },
+  getFeedbackUnreadCount: async () => {
+    const response = await apiClient.get('/student/feedback/unread-count');
+    return response.data;
+  },
+  markFeedbackSeen: async () => {
+    const response = await apiClient.post('/student/feedback/mark-seen');
     return response.data;
   },
 

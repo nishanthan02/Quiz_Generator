@@ -25,8 +25,13 @@ AsyncSessionLocal = async_sessionmaker(
     expire_on_commit=False
 )
 
+# Dynamically create the sync URL from the async one to ensure Celery works
+_sync_url = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+if "ssl=require" in _sync_url:
+    _sync_url = _sync_url.replace("ssl=require", "sslmode=require")
+
 sync_engine = create_engine(
-    settings.sync_database_url, 
+    _sync_url, 
     echo=False, 
     pool_pre_ping=True, 
     pool_recycle=300

@@ -245,3 +245,66 @@ async def submit_quiz(
     await db.commit()
 
     return {"message": "Quiz submitted successfully", "score": total_score}
+
+
+# ── AI Feedback System ─────────────────────────────────────
+
+@router.get("/feedback")
+async def get_my_feedback(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_student)
+):
+    from core.models import StudentFeedback
+    
+    result = await db.execute(
+        select(StudentFeedback, Quiz.title.label("quiz_title"), Subject.name.label("subject_name"), StudentAttempt.score)
+        .join(Quiz, Quiz.id == StudentFeedback.quiz_id)
+        .join(Subject, Subject.id == Quiz.subject_id)
+        .join(StudentAttempt, (StudentAttempt.quiz_id == StudentFeedback.quiz_id) & (StudentAttempt.student_id == StudentFeedback.student_id))
+        .where(StudentFeedback.student_id == current_user.id, StudentFeedback.status == "approved")
+        .order_by(StudentFeedback.approved_at.desc())
+    )
+    
+    feedbacks = result.all()
+    return [
+        {
+            "id": f.StudentFeedback.id,
+            "quiz_id": f.StudentFeedback.quiz_id,
+            "quiz_title": f.quiz_title,
+            "subject_name": f.subject_name,
+            "score": f.score,
+            "final_text": f.StudentFeedback.final_text,
+            "approved_at": f.StudentFeedback.approved_at,
+            "seen": f.StudentFeedback.seen
+        } for f in feedbacks
+    ]
+
+@router.get("/feedback/unread-count")
+async def get_feedback_unread_count(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_student)
+):
+    from core.models import StudentFeedback
+    result = await db.execute(
+        select(StudentFeedback).where(
+            StudentFeedback.student_id == current_user.id,
+            StudentFeedback.status == "approved",
+            StudentFeedback.seen == False
+        )
+    )
+    return {"count": len(result.scalars().all())}
+
+@router.post("/feedback/mark-seen")
+async def mark_feedback_seen(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_student)
+):
+    from core.models import StudentFeedback
+    from sqlalchemy import update
+    await db.execute(
+        update(StudentFeedback)
+        .where(StudentFeedback.student_id == current_user.id, StudentFeedback.status == "approved")
+        .values(seen=True)
+    )
+    await db.commit()
+    return {"message": "All marked seen"}

@@ -22,6 +22,7 @@ import QuizEditor from './pages/faculty/QuizEditor';
 import StudentDashboard from './pages/student/Dashboard';
 import StudentSubjectDetail from './pages/student/SubjectDetail';
 import QuizTaker from './pages/student/QuizTaker';
+import MyFeedback from './pages/student/MyFeedback';
 import QuizResults from './pages/faculty/QuizResults';
 
 // Sub-router guard for authenticated users
@@ -78,6 +79,7 @@ function App() {
               <Route path="/student/dashboard" element={<StudentDashboard />} />
               <Route path="/student/subject/:id" element={<StudentSubjectDetail />} />
               <Route path="/student/quiz/:id" element={<QuizTaker />} />
+              <Route path="/student/feedback" element={<MyFeedback />} />
             </Route>
           </Route>
         </Routes>
