@@ -1263,19 +1263,24 @@ async def get_feedback_status(
         raise HTTPException(status_code=404, detail="Quiz not found")
 
     fb_res = await db.execute(
-        select(StudentFeedback).where(StudentFeedback.quiz_id == quiz_id)
+        select(StudentFeedback, User.name.label("student_name"), User.email.label("student_email"))
+        .join(User, User.id == StudentFeedback.student_id)
+        .where(StudentFeedback.quiz_id == quiz_id)
+        .order_by(StudentFeedback.id)
     )
-    feedbacks = fb_res.scalars().all()
-    
+    rows = fb_res.all()
+
     return [
         {
-            "id": f.id,
-            "student_id": f.student_id,
-            "status": f.status,
-            "ai_text": f.ai_text,
-            "final_text": f.final_text,
-            "error_msg": f.error_msg
-        } for f in feedbacks
+            "id": row.StudentFeedback.id,
+            "student_id": row.StudentFeedback.student_id,
+            "student_name": row.student_name,
+            "student_email": row.student_email,
+            "status": row.StudentFeedback.status,
+            "ai_text": row.StudentFeedback.ai_text,
+            "final_text": row.StudentFeedback.final_text,
+            "error_msg": row.StudentFeedback.error_msg
+        } for row in rows
     ]
 
 class ReviewItem(BaseModel):
