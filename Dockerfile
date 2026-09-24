@@ -18,11 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install MinIO ─────────────────────────────────────────────
-# dl.min.io direct URL was deprecated (410 Gone). Using GitHub releases instead.
-RUN curl -fsSL -L --retry 5 --retry-delay 3 \
+# MinIO is optional. HF Spaces sometimes blocks or 404s these URLs.
+# If it fails, we just echo a warning and continue the build.
+RUN (curl -fsSL -L --retry 5 --retry-delay 3 \
         https://github.com/minio/minio/releases/latest/download/minio \
         -o /usr/local/bin/minio \
-    && chmod +x /usr/local/bin/minio
+    && chmod +x /usr/local/bin/minio) \
+    || echo "MinIO download skipped — document upload features will be unavailable"
 
 
 # ── Create required directories & User setup ──────────────────
