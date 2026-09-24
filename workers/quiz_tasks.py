@@ -162,22 +162,15 @@ def generate_quiz_variants(
             questions_each=questions_each,
         )
 
-        # ── Step 10: Upload result to MinIO ──────────────────
-        result_payload = {
-            "job_id":       job_id,
-            "document_id":  document_id,
-            "topic_focus":  topic_focus,
-            "bloom_level":  bloom_level,
-            "difficulty":   difficulty,
-            "question_type": question_type,
-            "num_variants": num_variants,
-            "questions_each": questions_each,
-            "bank_size":    len(validated_bank),
-            "variants":     variants,
-        }
-
-        minio_path = upload_quiz_result(result_payload["variants"], job_id)
-        print(f"[QuizTask job={job_id}] Result uploaded to MinIO: {minio_path}")
+        # ── Step 10: Upload result to MinIO (optional) ───────
+        # MinIO may not be available (e.g. on HF Spaces). The quiz is still
+        # fully functional — all questions are saved to PostgreSQL in Step 11.
+        minio_path = None
+        try:
+            minio_path = upload_quiz_result(variants, job_id)
+            print(f"[QuizTask job={job_id}] Result uploaded to MinIO: {minio_path}")
+        except Exception as minio_err:
+            print(f"[QuizTask job={job_id}] MinIO upload skipped (not available): {minio_err}")
 
         # ── Step 11: Mark complete & Save standard questions ──
         save_generated_questions_sync(job_id, validated_bank)

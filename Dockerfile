@@ -14,16 +14,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         redis-server \
         supervisor \
         wget \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install MinIO ─────────────────────────────────────────────
-# MinIO is optional — if the download fails (e.g. network restriction on HF),
-# the app still works for all quiz/feedback features. Documents upload won't work.
-RUN wget -q --tries=3 --timeout=30 \
+# Try wget first, fall back to curl. Both are now installed so this is reliable.
+RUN wget -q --tries=5 --timeout=60 \
         -O /usr/local/bin/minio \
         https://dl.min.io/server/minio/release/linux-amd64/minio \
-    && chmod +x /usr/local/bin/minio \
-    || echo "MinIO download skipped — document upload features will be unavailable"
+    || curl -fsSL --retry 5 --retry-delay 3 \
+        https://dl.min.io/server/minio/release/linux-amd64/minio \
+        -o /usr/local/bin/minio \
+    && chmod +x /usr/local/bin/minio
 
 
 # ── Create required directories & User setup ──────────────────
