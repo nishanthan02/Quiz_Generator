@@ -18,12 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install MinIO ─────────────────────────────────────────────
-# Try wget first, fall back to curl. Both are now installed so this is reliable.
-RUN wget -q --tries=5 --timeout=60 \
-        -O /usr/local/bin/minio \
-        https://dl.min.io/server/minio/release/linux-amd64/minio \
-    || curl -fsSL --retry 5 --retry-delay 3 \
-        https://dl.min.io/server/minio/release/linux-amd64/minio \
+# dl.min.io direct URL was deprecated (410 Gone). Using GitHub releases instead.
+RUN curl -fsSL -L --retry 5 --retry-delay 3 \
+        https://github.com/minio/minio/releases/latest/download/minio \
         -o /usr/local/bin/minio \
     && chmod +x /usr/local/bin/minio
 
