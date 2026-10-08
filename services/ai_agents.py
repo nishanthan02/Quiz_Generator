@@ -267,8 +267,13 @@ def run_generator_agent(
 ) -> list[dict]:
     """
     Step 1: Call LLM to generate mirrored candidate questions.
+    Uses an Over-Generation Buffer (1.5x) so if the evaluator filters 
+    some out, we still hit the exact target number the user requested.
     """
-    total_questions = num_variants * questions_each
+    base_total = num_variants * questions_each
+    # Add a 50% buffer to account for questions the evaluator might reject
+    total_questions = int(base_total * 1.5)
+    
     prompt = GENERATOR_PROMPT_TEMPLATE.format(
         num_variants=num_variants,
         questions_each=questions_each,
@@ -281,7 +286,7 @@ def run_generator_agent(
     )
     raw = _call_llm(model_id, prompt)
     questions = _parse_json_response(raw)
-    print(f"[Generator Agent] Produced {len(questions)} candidate questions via {model_id}.")
+    print(f"[Generator Agent] Requested {total_questions} (with buffer). Produced {len(questions)} candidate questions via {model_id}.")
     return questions
 
 
