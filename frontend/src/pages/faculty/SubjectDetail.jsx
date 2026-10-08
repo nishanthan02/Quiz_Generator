@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ArrowLeft, FileText, BrainCircuit, Users, Plus, UploadCloud, RefreshCw, Trash2, Download, FileDown, DatabaseZap } from 'lucide-react';
+import { ArrowLeft, FileText, BrainCircuit, Users, Plus, UploadCloud, RefreshCw, Trash2, Download, FileDown, DatabaseZap, FileSpreadsheet } from 'lucide-react';
 import { api, getApiErrorMessage } from '../../api/client';
 import toast from 'react-hot-toast';
 import ConstructQuizModal from '../../components/wizard/ConstructQuizModal';
@@ -248,6 +248,61 @@ export default function SubjectDetail() {
     }
   };
 
+  const handleQuizDownloadCsv = async (e, quiz) => {
+    e.stopPropagation();
+    const loadingToast = toast.loading('Preparing CSV download...');
+    try {
+      const quizData = await api.getQuiz(quiz.id);
+      
+      let docName = "unknown_document";
+      if (quiz.description && quiz.description.startsWith("Generated from ")) {
+        docName = quiz.description.replace("Generated from ", "");
+      }
+      const modelName = quiz.model_name || "manual";
+      const fileName = `${docName}_${modelName}`.replace(/\s+/g, '_');
+
+      const headers = ["Question", "Type", "Marks", "Option 1", "Option 2", "Option 3", "Option 4", "Correct Answer"];
+      let csvContent = headers.join(",") + "\n";
+
+      if (quizData.questions) {
+        quizData.questions.forEach((q) => {
+          const qText = `"${(q.question_text || '').replace(/"/g, '""')}"`;
+          const type = `"${(q.question_type || '').replace(/"/g, '""')}"`;
+          const marks = q.marks || 1;
+          
+          let opt1 = "", opt2 = "", opt3 = "", opt4 = "", correct = "";
+          if (q.options && q.options.length > 0) {
+             opt1 = q.options[0] ? `"${(q.options[0].option_text || '').replace(/"/g, '""')}"` : "";
+             opt2 = q.options[1] ? `"${(q.options[1].option_text || '').replace(/"/g, '""')}"` : "";
+             opt3 = q.options[2] ? `"${(q.options[2].option_text || '').replace(/"/g, '""')}"` : "";
+             opt4 = q.options[3] ? `"${(q.options[3].option_text || '').replace(/"/g, '""')}"` : "";
+             
+             const correctOpt = q.options.find(o => o.is_correct);
+             if (correctOpt) {
+                correct = `"${correctOpt.option_text.replace(/"/g, '""')}"`;
+             }
+          }
+
+          csvContent += [qText, type, marks, opt1, opt2, opt3, opt4, correct].join(",") + "\n";
+        });
+      }
+
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const downloadAnchorNode = document.createElement('a');
+      downloadAnchorNode.setAttribute("href", url);
+      downloadAnchorNode.setAttribute("download", `${fileName}.csv`);
+      document.body.appendChild(downloadAnchorNode); 
+      downloadAnchorNode.click();
+      downloadAnchorNode.remove();
+      URL.revokeObjectURL(url);
+      
+      toast.success('CSV Download started!', { id: loadingToast });
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Failed to download CSV'), { id: loadingToast });
+    }
+  };
+
   if (loading) return <div className="p-8 text-center text-slate-500">Loading subject...</div>;
   if (!subject) return null;
 
@@ -467,6 +522,13 @@ export default function SubjectDetail() {
                         title="Download Quiz as JSON"
                       >
                         <Download className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={(e) => handleQuizDownloadCsv(e, quiz)}
+                        className="p-1.5 text-slate-400 hover:text-green-600 hover:bg-green-50 rounded-md transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                        title="Export Quiz as CSV (Excel)"
+                      >
+                        <FileSpreadsheet className="w-4 h-4" />
                       </button>
                       <button 
                         onClick={(e) => handleQuizDelete(e, quiz.id)}
