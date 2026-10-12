@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 
 export default function ConstructQuizModal({ isOpen, onClose, subjectId, documents, onQuizCreated }) {
   const [formData, setFormData] = useState({
+    title: '',
     document_id: documents?.filter(d => d.status === 'complete')?.[0]?.id || '',
     topic_focus: '',
     bloom_level: 'Apply',
@@ -48,6 +49,7 @@ export default function ConstructQuizModal({ isOpen, onClose, subjectId, documen
         document_id: parseInt(formData.document_id)
       });
       toast.success('Agent triggered successfully! Quiz is now generating.', { id: toastId });
+      setFormData(prev => ({ ...prev, title: '', topic_focus: '' }));
       onQuizCreated();
       onClose();
     } catch (err) {
@@ -75,6 +77,18 @@ export default function ConstructQuizModal({ isOpen, onClose, subjectId, documen
           ) : (
             <>
               <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1">Quiz Name</label>
+                <input 
+                  type="text" 
+                  required
+                  placeholder="e.g. Unit 1 Assessment, Mid-Term Quiz"
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500"
+                  value={formData.title}
+                  onChange={(e) => setFormData({...formData, title: e.target.value})}
+                />
+              </div>
+
+              <div>
                 <label className="block text-sm font-semibold text-slate-700 mb-1">Source Document</label>
                 <select 
                   className="w-full border border-slate-300 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-indigo-500 outline-none"
@@ -89,7 +103,7 @@ export default function ConstructQuizModal({ isOpen, onClose, subjectId, documen
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1">Topic Focus</label>
+                <label className="block text-sm font-semibold text-slate-700 mb-1">Topic Focus (AI Prompt)</label>
                 <input 
                   type="text" 
                   required

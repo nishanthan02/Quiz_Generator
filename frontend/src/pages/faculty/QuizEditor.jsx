@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Save, Plus, Trash2, CheckCircle2, Circle, Info } from 'lucide-react';
-import { api } from '../../api/client';
+import { api, getApiErrorMessage } from '../../api/client';
 import toast from 'react-hot-toast';
 
 export default function QuizEditor() {
@@ -35,22 +35,28 @@ export default function QuizEditor() {
         title: quiz.title,
         description: quiz.description || '',
         status: quiz.status,
-        questions: quiz.questions.map(q => ({
+        questions: (quiz.questions || []).map(q => ({
+          id: q.id || undefined,
           question_text: q.question_text,
           question_type: q.question_type || "mcq",
           marks: q.marks || 1.0,
-          options: q.options.map(opt => ({
+          options: (q.options || []).map(opt => ({
+            id: opt.id || undefined,
             option_text: opt.option_text,
-            is_correct: opt.is_correct
+            is_correct: Boolean(opt.is_correct)
           }))
         }))
       };
       
-      await api.updateQuiz(id, payload);
+      await api.updateQuizBulk(id, payload);
       toast.success('Successfully updated quiz questions!', { id: toastId });
-      navigate('/faculty/dashboard'); // Or go back to subject detail
+      if (quiz.subject_id) {
+        navigate(`/faculty/subject/${quiz.subject_id}`);
+      } else {
+        navigate(-1);
+      }
     } catch (err) {
-      toast.error('Failed to save quiz.', { id: toastId });
+      toast.error(getApiErrorMessage(err, 'Failed to save quiz.'), { id: toastId });
     } finally {
       setSaving(false);
     }
@@ -178,6 +184,7 @@ export default function QuizEditor() {
                 <option value="draft">Draft</option>
                 <option value="generating">Generating</option>
                 <option value="complete">Complete</option>
+                <option value="published">Published</option>
                 <option value="approved">Approved</option>
                 <option value="failed">Failed</option>
               </select>

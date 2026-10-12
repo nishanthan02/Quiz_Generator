@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from typing import List, Optional
 from core.database import get_async_db
-from core.models import User, Subject, Quiz, Question, Option, Document, StudentAttempt
+from core.models import User, Subject, Quiz, Question, Option, Document, StudentAttempt, AttemptAnswer
 from routers.auth_router import get_current_faculty
 from services.minio_service import upload_document
 from workers.document_tasks import process_document
@@ -46,20 +46,23 @@ class QuizCreate(BaseModel):
     status: str = "draft"
     questions: Optional[List[QuestionCreate]] = []
 
-class QuizUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-
 class BulkOptionUpdate(BaseModel):
+    id: Optional[int] = None
     option_text: str
     is_correct: bool
 
 class BulkQuestionUpdate(BaseModel):
+    id: Optional[int] = None
     question_text: str
     question_type: str = "mcq"
     marks: float = 1.0
     options: List[BulkOptionUpdate]
+
+class QuizUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    questions: Optional[List[BulkQuestionUpdate]] = None
 
 class QuizBulkUpdate(BaseModel):
     title: str
@@ -68,6 +71,7 @@ class QuizBulkUpdate(BaseModel):
     questions: List[BulkQuestionUpdate]
 
 class QuizGenerateRequest(BaseModel):
+    title: Optional[str] = None
     document_id: int
     topic_focus: str
     bloom_level: str
@@ -108,6 +112,7 @@ class DocumentResponse(BaseModel):
 
 class QuizResponse(BaseModel):
     id: int
+    subject_id: Optional[int] = None
     title: str
     description: Optional[str] = None
     status: str
@@ -524,6 +529,162 @@ async def get_quiz_detail(
         raise HTTPException(status_code=404, detail="Quiz not found")
     return quiz
 
+async def _sync_quiz_questions(
+    db: AsyncSession,
+    quiz_id: int,
+    questions_in: List[BulkQuestionUpdate]
+):
+    existing_q_res = await db.execute(
+        select(Question)
+        .options(selectinload(Question.options))
+        .where(Question.quiz_id == quiz_id)
+    )
+    existing_questions = list(existing_q_res.scalars().all())
+    existing_q_by_id = {q.id: q for q in existing_questions}
+    matched_q_ids = set()
+    q_matches: List[Optional[Question]] = []
+
+    # 1. Match by explicit Question ID first
+    for q_in in questions_in:
+        if q_in.id is not None and q_in.id in existing_q_by_id and q_in.id not in matched_q_ids:
+            matched_q_ids.add(q_in.id)
+            q_matches.append(existing_q_by_id[q_in.id])
+        else:
+            q_matches.append(None)
+
+    # 2. Fallback: match by question_text for items without an ID
+    for idx, q_in in enumerate(questions_in):
+        if q_matches[idx] is None and q_in.id is None:
+            for eq in existing_questions:
+                if eq.id not in matched_q_ids and eq.question_text == q_in.question_text:
+                    matched_q_ids.add(eq.id)
+                    q_matches[idx] = eq
+                    break
+
+    # 3. Delete removed questions (and any AttemptAnswer / Option rows referencing them)
+    removed_q_ids = {q.id for q in existing_questions if q.id not in matched_q_ids}
+    if removed_q_ids:
+        removed_opt_ids = [
+            opt.id for q in existing_questions if q.id in removed_q_ids for opt in q.options
+        ]
+        if removed_opt_ids:
+            await db.execute(
+                AttemptAnswer.__table__.delete().where(
+                    AttemptAnswer.selected_option_id.in_(removed_opt_ids)
+                )
+            )
+        await db.execute(
+            AttemptAnswer.__table__.delete().where(
+                AttemptAnswer.question_id.in_(removed_q_ids)
+            )
+        )
+        await db.execute(
+            Option.__table__.delete().where(Option.question_id.in_(removed_q_ids))
+        )
+        await db.execute(
+            Question.__table__.delete().where(Question.id.in_(removed_q_ids))
+        )
+        await db.flush()
+
+    # 4. Update kept questions in-place and insert new questions
+    for q_in, q_obj in zip(questions_in, q_matches):
+        if q_obj is not None:
+            q_obj.question_text = q_in.question_text
+            q_obj.question_type = q_in.question_type
+            q_obj.marks = q_in.marks
+
+            existing_opts = list(q_obj.options)
+            existing_opt_by_id = {opt.id: opt for opt in existing_opts}
+            matched_opt_ids = set()
+            opt_matches: List[Optional[Option]] = []
+
+            for opt_in in q_in.options:
+                if opt_in.id is not None and opt_in.id in existing_opt_by_id and opt_in.id not in matched_opt_ids:
+                    matched_opt_ids.add(opt_in.id)
+                    opt_matches.append(existing_opt_by_id[opt_in.id])
+                else:
+                    opt_matches.append(None)
+
+            for o_idx, opt_in in enumerate(q_in.options):
+                if opt_matches[o_idx] is None and opt_in.id is None:
+                    for e_opt in existing_opts:
+                        if e_opt.id not in matched_opt_ids and e_opt.option_text == opt_in.option_text:
+                            matched_opt_ids.add(e_opt.id)
+                            opt_matches[o_idx] = e_opt
+                            break
+                    if opt_matches[o_idx] is None and o_idx < len(existing_opts):
+                        cand = existing_opts[o_idx]
+                        if cand.id not in matched_opt_ids:
+                            matched_opt_ids.add(cand.id)
+                            opt_matches[o_idx] = cand
+
+            removed_opt_ids = [opt.id for opt in existing_opts if opt.id not in matched_opt_ids]
+            if removed_opt_ids:
+                await db.execute(
+                    AttemptAnswer.__table__.delete().where(
+                        AttemptAnswer.selected_option_id.in_(removed_opt_ids)
+                    )
+                )
+                await db.execute(
+                    Option.__table__.delete().where(Option.id.in_(removed_opt_ids))
+                )
+
+            for opt_in, opt_obj in zip(q_in.options, opt_matches):
+                if opt_obj is not None:
+                    opt_obj.option_text = opt_in.option_text
+                    opt_obj.is_correct = opt_in.is_correct
+                else:
+                    db.add(Option(
+                        question_id=q_obj.id,
+                        option_text=opt_in.option_text,
+                        is_correct=opt_in.is_correct
+                    ))
+        else:
+            new_q = Question(
+                quiz_id=quiz_id,
+                question_text=q_in.question_text,
+                question_type=q_in.question_type,
+                marks=q_in.marks
+            )
+            db.add(new_q)
+            await db.flush()
+            for opt_in in q_in.options:
+                db.add(Option(
+                    question_id=new_q.id,
+                    option_text=opt_in.option_text,
+                    is_correct=opt_in.is_correct
+                ))
+
+    await db.flush()
+
+    # 5. Recalculate scores for any existing student attempts on this quiz
+    attempts_res = await db.execute(
+        select(StudentAttempt)
+        .options(selectinload(StudentAttempt.answers))
+        .where(StudentAttempt.quiz_id == quiz_id)
+    )
+    attempts = attempts_res.scalars().all()
+    if attempts:
+        updated_q_res = await db.execute(
+            select(Question)
+            .options(selectinload(Question.options))
+            .where(Question.quiz_id == quiz_id)
+        )
+        q_lookup = {}
+        for q in updated_q_res.scalars().all():
+            correct_opt = next((o for o in q.options if o.is_correct), None)
+            q_lookup[q.id] = (q.marks or 1.0, correct_opt.id if correct_opt else None)
+
+        for att in attempts:
+            new_score = 0.0
+            for ans in att.answers:
+                if ans.question_id in q_lookup:
+                    marks, correct_id = q_lookup[ans.question_id]
+                    if correct_id is not None and ans.selected_option_id == correct_id:
+                        new_score += marks
+            att.score = new_score
+
+
 @router.put("/quizzes/{quiz_id}")
 async def update_quiz(
     quiz_id: int, 
@@ -537,20 +698,13 @@ async def update_quiz(
     quiz = result.scalars().first()
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found or unauthorized")
-        
-    if quiz.status == "published" and quiz_in.status != "published":
-         # Prevent un-publishing if we want to be strict, or maybe allow it? We'll just lock edits.
-         # Actually, we can just block editing details if it's already published.
-         pass
-         
-    # If it was already published, block modifying anything EXCEPT status (maybe) or block everything.
-    # Let's just say if it's published, they can't change title/description.
-    if quiz.status == "published" and (quiz_in.title or quiz_in.description):
-         raise HTTPException(status_code=400, detail="Cannot edit a published quiz.")
 
-    update_data = quiz_in.model_dump(exclude_unset=True)
+    update_data = quiz_in.model_dump(exclude_unset=True, exclude={"questions"})
     for key, value in update_data.items():
         setattr(quiz, key, value)
+
+    if quiz_in.questions is not None:
+        await _sync_quiz_questions(db, quiz_id, quiz_in.questions)
         
     await db.commit()
     return {"message": "Quiz updated successfully"}
@@ -570,46 +724,12 @@ async def bulk_update_quiz(
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found")
 
-    if quiz.status == "published":
-        raise HTTPException(status_code=400, detail="Cannot edit questions of a published quiz.")
-
     # Update metadata
     quiz.title = quiz_in.title
     quiz.description = quiz_in.description
     quiz.status = quiz_in.status
 
-    # Delete options for these questions first to satisfy FK constraints
-    await db.execute(
-        Option.__table__.delete().where(
-            Option.question_id.in_(
-                select(Question.id).where(Question.quiz_id == quiz_id)
-            )
-        )
-    )
-    # Delete existing questions
-    await db.execute(
-        Question.__table__.delete().where(Question.quiz_id == quiz_id)
-    )
-    await db.flush()
-
-    # Insert new ones
-    for q_in in quiz_in.questions:
-        new_q = Question(
-            quiz_id=quiz.id,
-            question_text=q_in.question_text,
-            question_type=q_in.question_type,
-            marks=q_in.marks
-        )
-        db.add(new_q)
-        await db.flush()
-        
-        for opt_in in q_in.options:
-            new_opt = Option(
-                question_id=new_q.id,
-                option_text=opt_in.option_text,
-                is_correct=opt_in.is_correct
-            )
-            db.add(new_opt)
+    await _sync_quiz_questions(db, quiz_id, quiz_in.questions)
 
     await db.commit()
     return {"message": "Quiz questions updated successfully"}
@@ -1141,9 +1261,10 @@ async def generate_quiz_for_subject(
     if doc.status != "complete":
         raise HTTPException(status_code=400, detail="Document must finish processing before generating a quiz.")
 
+    quiz_title = req.title.strip() if (req.title and req.title.strip()) else f"AI Quiz: {req.topic_focus}"
     new_quiz = Quiz(
         subject_id=subject.id,
-        title=f"AI Quiz: {req.topic_focus}",
+        title=quiz_title,
         description=f"Generated from {doc.filename}",
         topic_focus=req.topic_focus,
         bloom_level=req.bloom_level,
